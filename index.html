@@ -15,11 +15,25 @@
       /* Custom Animations */
       @keyframes popIn {
         0% { transform: scale(0); opacity: 0; }
-        60% { transform: scale(1.2); }
+        60% { transform: scale(1.15); }
         100% { transform: scale(1); opacity: 1; }
       }
+      
+      /* Instant appear animation: Stay at opacity 0 until the end */
+      @keyframes appearInstant {
+        0% { opacity: 0; }
+        99% { opacity: 0; }
+        100% { opacity: 1; }
+      }
+
       .stone-enter {
         animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+      }
+      
+      /* Face stays hidden for 0.3s (during stone pop), then appears instantly */
+      .face-enter {
+        opacity: 0;
+        animation: appearInstant 0.3s step-end forwards;
       }
     </style>
   <script type="importmap">

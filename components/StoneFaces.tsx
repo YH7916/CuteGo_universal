@@ -25,26 +25,28 @@ export const StoneFace: React.FC<FaceProps> = ({ x, y, size, color, mood }) => {
              <path d="M-4,8 Q0,6 4,8" fill="none" stroke={featureColor} strokeWidth="2" strokeLinecap="round" />
             </g>
         );
-      case 'worried': // "Original Style": Vertical stress lines + Grimace/Squiggly mouth
+      case 'worried': // Cute anxious: Tighter > < eyes with wavy mouth and teardrop sweat
         return (
           <g>
-            {/* Stress Lines (Vertical) */}
-            <path d="M-10,-11 L-10,-5" stroke={featureColor} strokeWidth="2" strokeLinecap="round" />
-            <path d="M-6,-13 L-6,-6" stroke={featureColor} strokeWidth="2" strokeLinecap="round" />
-            <path d="M-2,-11 L-2,-5" stroke={featureColor} strokeWidth="2" strokeLinecap="round" />
+            {/* Eyes > < (Sharper angle: deeper indentation, smaller vertical spread) */}
+            {/* Left Eye > */}
+            <path d="M-9.5,-4.5 L-4.5,-1 L-9.5,2.5" stroke={featureColor} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+            {/* Right Eye < */}
+            <path d="M9.5,-4.5 L4.5,-1 L9.5,2.5" stroke={featureColor} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+            
+            {/* Mouth: Wavy ~ */}
+            <path d="M-5,9 Q-2.5,6 0,9 Q2.5,12 5,9" fill="none" stroke={featureColor} strokeWidth="2" strokeLinecap="round" />
 
-            {/* Eyes (Small dots looking sideways) */}
-            <circle cx="-5" cy="2" r="2" fill={featureColor} />
-            <circle cx="5" cy="2" r="2" fill={featureColor} />
-            
-            {/* Mouth (Grimace / Wavy line) */}
-            <path d="M-5,10 Q-2,7 0,10 Q2,13 5,10" fill="none" stroke={featureColor} strokeWidth="2" strokeLinecap="round" />
-            
-            {/* Big Sweat Drop */}
-            <path d="M8,-5 Q12,-5 12,-2 Q12,1 8,1 Q6,1 6,-2 Q6,-5 8,-5" fill="#88ccff" stroke={featureColor} strokeWidth="0.5" />
+            {/* Sweat Drop - Proper Teardrop Shape */}
+            <path 
+              d="M12,-13 Q15,-9 15,-6 A3,3 0 1,1 9,-6 Q9,-9 12,-13 Z"
+              fill="#5dade2" 
+              stroke="#2e86c1" 
+              strokeWidth="0.5" 
+            />
           </g>
         );
-      case 'neutral': // Angry/Determined
+      case 'neutral': // Determined / Serious
         return (
           <g>
             <circle cx="-6" cy="1" r="2.5" fill={featureColor} />
@@ -56,7 +58,7 @@ export const StoneFace: React.FC<FaceProps> = ({ x, y, size, color, mood }) => {
             <path d="M-3,9 Q0,7 3,9" fill="none" stroke={featureColor} strokeWidth="2" strokeLinecap="round" />
           </g>
         );
-      case 'happy': // Clean cute face (No blush)
+      case 'happy': // Default cute
       default:
         return (
           <g>

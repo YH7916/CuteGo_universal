@@ -156,7 +156,6 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                 x2={GRID_PADDING + c.x2 * CELL_SIZE}
                 y2={GRID_PADDING + c.y2 * CELL_SIZE}
                 stroke={stroke}
-                // Ortho = 0.65, Diag = 0.35 (Visible but distinct)
                 strokeWidth={c.type === 'ortho' ? CELL_SIZE * 0.65 : CELL_SIZE * 0.35} 
                 strokeLinecap="round"
               />
@@ -168,7 +167,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
               cy={GRID_PADDING + s.y * CELL_SIZE}
               r={STONE_RADIUS} 
               fill={fill}
-              className="stone-enter"
+              className="stone-enter" 
             />
           ))}
         </g>
@@ -215,7 +214,11 @@ export const GameBoard: React.FC<GameBoardProps> = ({
 
         <g>
           {stones.map(s => (
-            <g key={`face-${s.id}`} className="stone-enter" style={{ transformOrigin: 'center' }}>
+            <g 
+                key={`face-${s.id}`} 
+                className="face-enter"
+                style={{ transformOrigin: 'center' }}
+            >
                <circle 
                  cx={GRID_PADDING + s.x * CELL_SIZE - CELL_SIZE*0.15} 
                  cy={GRID_PADDING + s.y * CELL_SIZE - CELL_SIZE*0.15} 

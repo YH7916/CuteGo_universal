@@ -45,6 +45,19 @@ const App: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const peerRef = useRef<Peer | null>(null);
 
+  // Refs for State (Fix for Stale Closures & Logic Synchronization)
+  const boardRef = useRef(board);
+  const currentPlayerRef = useRef(currentPlayer);
+  const gameTypeRef = useRef(gameType);
+  const myColorRef = useRef(myColor);
+  const onlineStatusRef = useRef(onlineStatus);
+
+  useEffect(() => { boardRef.current = board; }, [board]);
+  useEffect(() => { currentPlayerRef.current = currentPlayer; }, [currentPlayer]);
+  useEffect(() => { gameTypeRef.current = gameType; }, [gameType]);
+  useEffect(() => { myColorRef.current = myColor; }, [myColor]);
+  useEffect(() => { onlineStatusRef.current = onlineStatus; }, [onlineStatus]);
+
   useEffect(() => {
     resetGame();
   }, [boardSize, gameType]);
@@ -52,7 +65,6 @@ const App: React.FC = () => {
   // --- Online Logic ---
   useEffect(() => {
     if (showOnlineMenu && !peerRef.current) {
-        // Initialize Peer
         const id = 'puyo-' + Math.floor(Math.random() * 1000000).toString();
         const peer = new Peer(id);
         
@@ -76,30 +88,27 @@ const App: React.FC = () => {
           setOnlineStatus('connected');
           setShowOnlineMenu(false);
           setShowMenu(false);
-          setGameMode('PvP'); // Online is technically PvP logic restricted by color
+          setGameMode('PvP'); 
           
           if (isHost) {
               setMyColor('black');
-              // Host sends initial settings
               conn.send({ 
                   type: 'SYNC', 
                   boardSize, 
-                  gameType, 
-                  startColor: 'white' // Tell peer they are white
+                  gameType: gameTypeRef.current, 
+                  startColor: 'white' 
               });
-              resetGame(true); // Soft reset
+              resetGame(true); 
           }
       });
 
       conn.on('data', (data: any) => {
           const msg = data as PeerMessage;
           if (msg.type === 'MOVE') {
-              // Apply move from peer
-              applyMove(msg.x, msg.y, true); // true = remote move
+              executeMove(msg.x, msg.y, true); 
           } else if (msg.type === 'PASS') {
               handlePass(true);
           } else if (msg.type === 'SYNC') {
-              // Client receives settings
               setBoardSize(msg.boardSize);
               setGameType(msg.gameType);
               setMyColor(msg.startColor);
@@ -130,30 +139,41 @@ const App: React.FC = () => {
   
   // --- Game Logic ---
 
-  // Refactored applyMove to separate UI click from Logic
-  const applyMove = useCallback((x: number, y: number, isRemote: boolean = false) => {
-      setBoard(prevBoard => {
-         const result = attemptMove(prevBoard, x, y, currentPlayer, gameType);
-         if (result) {
-            setLastMove({ x, y });
-            setConsecutivePasses(0);
-            
-            if (currentPlayer === 'black') setBlackCaptures(prev => prev + result.captured);
-            else setWhiteCaptures(prev => prev + result.captured);
-            
-            if (gameType === 'Gomoku' && checkGomokuWin(result.newBoard, {x, y})) {
-               setTimeout(() => endGame(currentPlayer, '五子连珠！'), 0);
-            }
-            
-            // Switch Turn
-            setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
-            return result.newBoard;
-         }
-         return prevBoard;
-      });
-  }, [currentPlayer, gameType, board]);
+  // Unified Move Execution Logic (Local & Remote)
+  const executeMove = useCallback((x: number, y: number, isRemote: boolean) => {
+      // Always calculate using the LATEST refs to avoid stale state in callbacks
+      const currentBoard = boardRef.current;
+      const activePlayer = currentPlayerRef.current;
+      const currentType = gameTypeRef.current;
 
-  // The wrapper for UI clicks
+      const result = attemptMove(currentBoard, x, y, activePlayer, currentType);
+      
+      if (result) {
+          // Update Board
+          setBoard(result.newBoard);
+          setLastMove({ x, y });
+          setConsecutivePasses(0);
+
+          // Update Score - Critical: Use functional update to ensure we have the latest previous value
+          if (result.captured > 0) {
+              if (activePlayer === 'black') {
+                  setBlackCaptures(prev => prev + result.captured);
+              } else {
+                  setWhiteCaptures(prev => prev + result.captured);
+              }
+          }
+
+          // Check Win (Gomoku)
+          if (currentType === 'Gomoku' && checkGomokuWin(result.newBoard, {x, y})) {
+              setTimeout(() => endGame(activePlayer, '五子连珠！'), 0);
+              return;
+          }
+
+          // Switch Player
+          setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
+      }
+  }, []);
+
   const handleIntersectionClick = useCallback((x: number, y: number) => {
     if (gameOver || showPassModal) return;
     if (gameMode === 'PvAI' && currentPlayer === 'white') return;
@@ -161,63 +181,58 @@ const App: React.FC = () => {
     // Online Check
     if (onlineStatus === 'connected') {
         if (currentPlayer !== myColor) return; // Not my turn
-        // Send move
         connection?.send({ type: 'MOVE', x, y });
     }
 
-    const result = attemptMove(board, x, y, currentPlayer, gameType);
-    
-    if (result) {
-      setBoard(result.newBoard);
-      setLastMove({ x, y });
-      setConsecutivePasses(0);
-      
-      if (currentPlayer === 'black') setBlackCaptures(prev => prev + result.captured);
-      else setWhiteCaptures(prev => prev + result.captured);
+    // Execute Move locally
+    executeMove(x, y, false);
 
-      if (gameType === 'Gomoku' && checkGomokuWin(result.newBoard, {x, y})) {
-        endGame(currentPlayer, '五子连珠！');
-        return;
-      }
-      
-      setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
-    }
-  }, [board, currentPlayer, gameMode, gameOver, gameType, showPassModal, onlineStatus, myColor, connection]);
+  }, [gameOver, showPassModal, gameMode, currentPlayer, onlineStatus, myColor, connection, executeMove]);
 
   const handlePass = useCallback((isRemote: boolean = false) => {
     if (gameOver) return;
     
     // Online sync
-    if (onlineStatus === 'connected' && !isRemote) {
-        if (currentPlayer !== myColor) return;
+    if (onlineStatusRef.current === 'connected' && !isRemote) {
+        if (currentPlayerRef.current !== myColorRef.current) return;
         connection?.send({ type: 'PASS' });
     }
 
-    const newPasses = consecutivePasses + 1;
-    setConsecutivePasses(newPasses);
+    const activePlayer = currentPlayerRef.current;
+    
+    setConsecutivePasses(prev => {
+        const newPasses = prev + 1;
+        // Check for game end condition inside setter to ensure we have latest count
+        if (newPasses >= 2) {
+             // Defer the score calculation slightly to let render finish
+             setTimeout(() => {
+                const score = calculateScore(boardRef.current);
+                setFinalScore(score);
+                setShowPassModal(false);
+                if (score.black > score.white) {
+                    endGame('black', `比分: 黑 ${score.black} - 白 ${score.white}`);
+                } else {
+                    endGame('white', `比分: 白 ${score.white} - 黑 ${score.black}`);
+                }
+             }, 0);
+        }
+        return newPasses;
+    });
 
-    // AI or Remote pass notification
-    if (currentPlayer === 'white' && gameMode === 'PvAI') {
+    if (activePlayer === 'white' && gameMode === 'PvAI') {
         setShowPassModal(true);
     } else if (isRemote) {
-        setShowPassModal(true); // Show modal when opponent passes remotely
+        setShowPassModal(true);
     }
 
-    if (newPasses >= 2) {
-      const score = calculateScore(board);
-      setFinalScore(score);
-      setShowPassModal(false);
-      
-      if (score.black > score.white) {
-        endGame('black', `比分: 黑 ${score.black} - 白 ${score.white}`);
-      } else {
-        endGame('white', `比分: 白 ${score.white} - 黑 ${score.black}`);
-      }
-    } else {
-      setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
-      setLastMove(null);
+    // Switch player if game isn't ending
+    // Note: We don't have newPasses here easily without ref, but logic implies < 2 switch
+    if (consecutivePasses < 1) {
+         setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
+         setLastMove(null);
     }
-  }, [board, consecutivePasses, currentPlayer, gameOver, onlineStatus, myColor, gameMode]);
+
+  }, [gameOver, gameMode, connection, consecutivePasses]); 
 
   const endGame = (winner: Player, reason: string) => {
     setGameOver(true);
@@ -225,33 +240,21 @@ const App: React.FC = () => {
     setWinReason(reason);
   };
 
+  // AI Turn Handling
   useEffect(() => {
     if (gameMode === 'PvAI' && currentPlayer === 'white' && !gameOver && !showPassModal) {
       const timer = setTimeout(() => {
         const move = getAIMove(board, 'white', gameType, difficulty);
         if (move) {
-          const result = attemptMove(board, move.x, move.y, 'white', gameType);
-          if (result) {
-            setBoard(result.newBoard);
-            setLastMove(move);
-            setConsecutivePasses(0);
-            setWhiteCaptures(prev => prev + result.captured);
-
-            if (gameType === 'Gomoku' && checkGomokuWin(result.newBoard, move)) {
-                endGame('white', '五子连珠！');
-                return;
-            }
-            setCurrentPlayer('black');
-          } else {
-            handlePass();
-          }
+           // AI executes move via the same unified function
+           executeMove(move.x, move.y, false);
         } else {
            handlePass();
         }
       }, 700);
       return () => clearTimeout(timer);
     }
-  }, [currentPlayer, gameMode, board, gameOver, gameType, difficulty, consecutivePasses, handlePass, showPassModal]);
+  }, [currentPlayer, gameMode, board, gameOver, gameType, difficulty, showPassModal, handlePass, executeMove]);
 
   const resetGame = (keepOnline: boolean = false) => {
     setBoard(createBoard(boardSize));
@@ -266,12 +269,8 @@ const App: React.FC = () => {
     setFinalScore(null);
     setShowMenu(false);
     setShowPassModal(false);
-    if (!keepOnline) {
-        // Only reset online status if explicit full reset
-        // setOnlineStatus('disconnected'); 
-    }
-    // If online, notify peer of restart
-    if (onlineStatus === 'connected' && !keepOnline) {
+    
+    if (onlineStatusRef.current === 'connected' && !keepOnline) {
         connection?.send({ type: 'RESTART' });
     }
   };
@@ -312,17 +311,17 @@ const App: React.FC = () => {
          {/* Black Player Pill */}
          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'black' ? 'bg-black/10 border-black/20 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'black' ? 'ring-2 ring-blue-400' : ''}`}>
              <div className="w-6 h-6 rounded-full bg-[#2a2a2a] shadow-inner border-2 border-[#444] shrink-0"></div>
-             <div className="flex flex-col leading-none">
+             <div className="flex flex-col">
                  <span className="font-bold text-gray-800 text-sm">黑子 {onlineStatus === 'connected' && myColor === 'black' && '(我)'}</span>
-                 {gameType === 'Go' && <span className="text-[10px] text-gray-600 font-semibold">提子: {blackCaptures}</span>}
+                 {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {blackCaptures}</span>}
              </div>
          </div>
 
          {/* White Player Pill */}
          <div className={`flex items-center justify-end gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'white' ? 'bg-white/60 border-white/50 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'white' ? 'ring-2 ring-blue-400' : ''}`}>
-             <div className="flex flex-col items-end leading-none">
+             <div className="flex flex-col items-end">
                  <span className="font-bold text-gray-800 text-sm">白子 {onlineStatus === 'connected' && myColor === 'white' && '(我)'}</span>
-                 {gameType === 'Go' && <span className="text-[10px] text-gray-600 font-semibold">提子: {whiteCaptures}</span>}
+                 {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {whiteCaptures}</span>}
              </div>
              <div className="w-6 h-6 rounded-full bg-[#f0f0f0] shadow-inner border-2 border-white shrink-0"></div>
          </div>
