@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { getAllGroups } from '../utils/goLogic';
-import { BoardState, Player, Stone } from '../types';
+import { BoardState, Player, Stone, GameType } from '../types';
 import { StoneFace } from './StoneFaces';
 import { ZoomOut } from 'lucide-react';
 
@@ -10,6 +10,7 @@ interface GameBoardProps {
   currentPlayer: Player;
   lastMove: { x: number, y: number } | null;
   showQi: boolean;
+  gameType: GameType;
 }
 
 type ConnectionType = 'ortho' | 'loose';
@@ -27,7 +28,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   board, 
   onIntersectionClick, 
   lastMove,
-  showQi
+  showQi,
+  gameType
 }) => {
   const boardSize = board.length;
   // Dynamic cell size
@@ -105,80 +107,109 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   // Identify connections
   const connections = useMemo(() => {
     const lines: Connection[] = [];
-    
-    for(let y=0; y<boardSize; y++) {
-      for(let x=0; x<boardSize; x++) {
-        const stone = board[y][x];
-        if(!stone) continue;
-        const opColor = stone.color === 'black' ? 'white' : 'black';
-        const isValid = (cx: number, cy: number) => cx >= 0 && cx < boardSize && cy >= 0 && cy < boardSize;
+    const isValid = (cx: number, cy: number) => cx >= 0 && cx < boardSize && cy >= 0 && cy < boardSize;
 
-        // 1. ORTHO CONNECTIONS (The Snake Body)
-        if(isValid(x+1, y)) {
-           const right = board[y][x+1];
-           if(right && right.color === stone.color) {
-             lines.push({ x1: x, y1: y, x2: x+1, y2: y, color: stone.color, type: 'ortho' });
-           }
-        }
-        if(isValid(x, y+1)) {
-           const bottom = board[y+1][x];
-           if(bottom && bottom.color === stone.color) {
-             lines.push({ x1: x, y1: y, x2: x, y2: y+1, color: stone.color, type: 'ortho' });
-           }
-        }
-
-        // 2. LOOSE CONNECTIONS (The Silk)
-        const addLooseIfIsolated = (dx: number, dy: number) => {
-            const tx = x + dx;
-            const ty = y + dy;
+    if (gameType === 'Gomoku') {
+        // --- GOMOKU LOGIC: Ortho + Diagonal are both rendered in the body layer ('ortho') ---
+        // We use 'ortho' type so they are rendered in renderSolidBody, but we will adjust width there.
+        for(let y=0; y<boardSize; y++) {
+          for(let x=0; x<boardSize; x++) {
+            const stone = board[y][x];
+            if(!stone) continue;
             
-            if (!isValid(tx, ty)) return;
-            const target = board[ty][tx];
-            if (!target || target.color !== stone.color) return;
+            // Check Right (1, 0)
+            if(isValid(x+1, y) && board[y][x+1]?.color === stone.color) {
+               lines.push({ x1: x, y1: y, x2: x+1, y2: y, color: stone.color, type: 'ortho' });
+            }
+            // Check Down (0, 1)
+            if(isValid(x, y+1) && board[y+1][x]?.color === stone.color) {
+               lines.push({ x1: x, y1: y, x2: x, y2: y+1, color: stone.color, type: 'ortho' });
+            }
+            // Check Diagonal Down-Right (1, 1)
+            if(isValid(x+1, y+1) && board[y+1][x+1]?.color === stone.color) {
+               lines.push({ x1: x, y1: y, x2: x+1, y2: y+1, color: stone.color, type: 'ortho' });
+            }
+            // Check Diagonal Down-Left (-1, 1)
+             if(isValid(x-1, y+1) && board[y+1][x-1]?.color === stone.color) {
+               lines.push({ x1: x, y1: y, x2: x-1, y2: y+1, color: stone.color, type: 'ortho' });
+            }
+          }
+        }
+    } else {
+        // --- GO LOGIC: Ortho Strong, Knight/Large Loose ---
+        for(let y=0; y<boardSize; y++) {
+          for(let x=0; x<boardSize; x++) {
+            const stone = board[y][x];
+            if(!stone) continue;
+            const opColor = stone.color === 'black' ? 'white' : 'black';
 
-            const minX = Math.min(x, tx);
-            const maxX = Math.max(x, tx);
-            const minY = Math.min(y, ty);
-            const maxY = Math.max(y, ty);
+            // 1. ORTHO CONNECTIONS (The Snake Body)
+            if(isValid(x+1, y)) {
+               const right = board[y][x+1];
+               if(right && right.color === stone.color) {
+                 lines.push({ x1: x, y1: y, x2: x+1, y2: y, color: stone.color, type: 'ortho' });
+               }
+            }
+            if(isValid(x, y+1)) {
+               const bottom = board[y+1][x];
+               if(bottom && bottom.color === stone.color) {
+                 lines.push({ x1: x, y1: y, x2: x, y2: y+1, color: stone.color, type: 'ortho' });
+               }
+            }
 
-            let hasBridge = false;
-            
-            for (let by = minY; by <= maxY; by++) {
-                for (let bx = minX; bx <= maxX; bx++) {
-                    if ((bx === x && by === y) || (bx === tx && by === ty)) continue;
-                    const midStone = board[by][bx];
-                    if (midStone && midStone.color === stone.color) {
-                        hasBridge = true;
-                        break;
+            // 2. LOOSE CONNECTIONS (The Silk)
+            const addLooseIfIsolated = (dx: number, dy: number) => {
+                const tx = x + dx;
+                const ty = y + dy;
+                
+                if (!isValid(tx, ty)) return;
+                const target = board[ty][tx];
+                if (!target || target.color !== stone.color) return;
+
+                const minX = Math.min(x, tx);
+                const maxX = Math.max(x, tx);
+                const minY = Math.min(y, ty);
+                const maxY = Math.max(y, ty);
+
+                let hasBridge = false;
+                
+                for (let by = minY; by <= maxY; by++) {
+                    for (let bx = minX; bx <= maxX; bx++) {
+                        if ((bx === x && by === y) || (bx === tx && by === ty)) continue;
+                        const midStone = board[by][bx];
+                        if (midStone && midStone.color === stone.color) {
+                            hasBridge = true;
+                            break;
+                        }
                     }
+                    if (hasBridge) break;
                 }
-                if (hasBridge) break;
-            }
 
-            let isCut = false;
-            if (Math.abs(dx) === 1 && Math.abs(dy) === 1) {
-                 const s1 = board[y][tx]; 
-                 const s2 = board[ty][x]; 
-                 if (s1?.color === opColor && s2?.color === opColor) isCut = true;
-            }
+                let isCut = false;
+                if (Math.abs(dx) === 1 && Math.abs(dy) === 1) {
+                     const s1 = board[y][tx]; 
+                     const s2 = board[ty][x]; 
+                     if (s1?.color === opColor && s2?.color === opColor) isCut = true;
+                }
 
-            if (!hasBridge && !isCut) {
-                lines.push({ x1: x, y1: y, x2: tx, y2: ty, color: stone.color, type: 'loose' });
-            }
-        };
+                if (!hasBridge && !isCut) {
+                    lines.push({ x1: x, y1: y, x2: tx, y2: ty, color: stone.color, type: 'loose' });
+                }
+            };
 
-        addLooseIfIsolated(1, 1);
-        addLooseIfIsolated(-1, 1);
-        addLooseIfIsolated(2, 0);
-        addLooseIfIsolated(0, 2);
-        addLooseIfIsolated(1, 2);
-        addLooseIfIsolated(2, 1);
-        addLooseIfIsolated(-1, 2);
-        addLooseIfIsolated(-2, 1);
-      }
+            addLooseIfIsolated(1, 1);
+            addLooseIfIsolated(-1, 1);
+            addLooseIfIsolated(2, 0);
+            addLooseIfIsolated(0, 2);
+            addLooseIfIsolated(1, 2);
+            addLooseIfIsolated(2, 1);
+            addLooseIfIsolated(-1, 2);
+            addLooseIfIsolated(-2, 1);
+          }
+        }
     }
     return lines;
-  }, [board, boardSize]);
+  }, [board, boardSize, gameType]);
 
   const stones = useMemo(() => {
     const flat: Stone[] = [];
@@ -241,8 +272,16 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         }
 
         let mood: 'happy' | 'neutral' | 'worried' = 'happy';
-        if (group.liberties === 1) mood = 'worried';
-        else if (group.liberties <= 3) mood = 'neutral';
+        
+        if (gameType === 'Go') {
+             if (group.liberties === 1) mood = 'worried';
+             else if (group.liberties <= 3) mood = 'neutral';
+        } else {
+            // Gomoku Mood Logic
+            if (count >= 4) mood = 'happy';
+            else if (count === 3) mood = 'neutral';
+            else mood = 'happy'; 
+        }
 
         const sizeBonus = Math.min(count - 1, 3) * 0.1;
 
@@ -255,7 +294,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             scale: 1 + sizeBonus
         };
     });
-  }, [board]);
+  }, [board, gameType]);
 
   const renderGridLines = () => {
     const lines = [];
@@ -341,7 +380,12 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   const renderSolidBody = (color: Player) => {
     const baseColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
     const filterId = color === 'black' ? 'url(#jelly-black)' : 'url(#jelly-white)';
-    const orthoWidth = CELL_SIZE * 0.95; 
+    
+    // VISUAL TWEAK: 
+    // For Go: Thick lines (0.95) merge stones into a single solid block.
+    // For Gomoku: Thin lines (0.22) create a "Metaball" effect (Dumbbells) 
+    // where stones are distinct but connected by a liquid neck.
+    const orthoWidth = gameType === 'Gomoku' ? CELL_SIZE * 0.22 : CELL_SIZE * 0.95;
 
     return (
         <g filter={filterId}>

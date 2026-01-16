@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameBoard } from './components/GameBoard';
 import { BoardState, Player, GameMode, GameType, BoardSize, Difficulty } from './types';
 import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore, calculateWinRate } from './utils/goLogic';
-import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull, Undo2 } from 'lucide-react';
+import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull, Undo2, AlertCircle, X } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
 
 // Types for P2P Messages
@@ -42,6 +42,7 @@ const App: React.FC = () => {
   const [winner, setWinner] = useState<Player | null>(null);
   const [winReason, setWinReason] = useState<string>('');
   const [consecutivePasses, setConsecutivePasses] = useState(0);
+  const [passNotificationDismissed, setPassNotificationDismissed] = useState(false); // New state to dismiss notification
   const [finalScore, setFinalScore] = useState<{black: number, white: number} | null>(null);
   
   // Undo Stack
@@ -49,7 +50,7 @@ const App: React.FC = () => {
   
   // UI State
   const [showMenu, setShowMenu] = useState(false);
-  const [showPassModal, setShowPassModal] = useState(false);
+  const [showPassModal, setShowPassModal] = useState(false); // Only used for manual user pass confirmation if needed
   const [isThinking, setIsThinking] = useState(false); // Block undo during AI turn
 
   // Online State
@@ -62,8 +63,14 @@ const App: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const peerRef = useRef<Peer | null>(null);
   
-  // Audio Ref
+  // Audio Refs
   const bgmRef = useRef<HTMLAudioElement | null>(null);
+  const sfxMove = useRef<HTMLAudioElement | null>(null);
+  const sfxCapture = useRef<HTMLAudioElement | null>(null);
+  const sfxError = useRef<HTMLAudioElement | null>(null);
+  const sfxWin = useRef<HTMLAudioElement | null>(null);
+  const sfxLose = useRef<HTMLAudioElement | null>(null);
+
   const [hasInteracted, setHasInteracted] = useState(false);
 
   // Refs for State (Fix for Stale Closures & Logic Synchronization)
@@ -78,6 +85,35 @@ const App: React.FC = () => {
   useEffect(() => { gameTypeRef.current = gameType; }, [gameType]);
   useEffect(() => { myColorRef.current = myColor; }, [myColor]);
   useEffect(() => { onlineStatusRef.current = onlineStatus; }, [onlineStatus]);
+
+  // Handle Audio Initialization
+  useEffect(() => {
+     sfxMove.current = new Audio('/move.mp3');
+     sfxCapture.current = new Audio('/capture.mp3');
+     sfxError.current = new Audio('/error.mp3');
+     sfxWin.current = new Audio('/win.mp3');
+     sfxLose.current = new Audio('/lose.mp3');
+  }, []);
+
+  const playSfx = (type: 'move' | 'capture' | 'error' | 'win' | 'lose') => {
+      if (musicVolume === 0) return; // Mute SFX if volume is 0 (simple logic)
+      
+      const play = (ref: React.MutableRefObject<HTMLAudioElement | null>) => {
+          if (ref.current) {
+              ref.current.currentTime = 0;
+              ref.current.volume = Math.min(1, musicVolume + 0.2); // SFX slightly louder
+              ref.current.play().catch(() => {});
+          }
+      };
+
+      switch(type) {
+          case 'move': play(sfxMove); break;
+          case 'capture': play(sfxCapture); break;
+          case 'error': play(sfxError); break;
+          case 'win': play(sfxWin); break;
+          case 'lose': play(sfxLose); break;
+      }
+  };
 
   // Handle BGM Playback Logic
   useEffect(() => {
@@ -198,7 +234,6 @@ const App: React.FC = () => {
       if (history.length === 0 || isThinking || gameOver || onlineStatus === 'connected') return;
 
       // In PvAI, undo 2 steps if it's player's turn (to undo AI's move + Player's move)
-      // Unless history has only 1 step (AI started? Rare case in current logic as Black always starts)
       let stepsToUndo = 1;
       if (gameMode === 'PvAI' && currentPlayer === 'black' && history.length >= 2) {
           stepsToUndo = 2;
@@ -211,6 +246,7 @@ const App: React.FC = () => {
       setWhiteCaptures(prev.whiteCaptures);
       setLastMove(prev.lastMove);
       setConsecutivePasses(prev.consecutivePasses);
+      setPassNotificationDismissed(false); // Reset notification on undo
       
       setHistory(prevHistory => prevHistory.slice(0, prevHistory.length - stepsToUndo));
   };
@@ -232,45 +268,19 @@ const App: React.FC = () => {
       const activePlayer = currentPlayerRef.current;
       const currentType = gameTypeRef.current;
 
-      // Ko Check: Get previous board hash from history
+      // Ko Check
       let prevHash = null;
       if (history.length > 0) {
-          // The board before current player made a move is at history index [length-1]? 
-          // No, history saves state BEFORE a move. 
-          // So history[length-1].board is the state before activePlayer moved? 
-          // Actually, we need to compare against the board state *before the opponent moved* for Ko.
-          // But 'attemptMove' just checks if the *resulting* board is same as *immediate previous*. 
-          // Wait, Ko rule: You cannot play a move that recreates the board state of the PREVIOUS turn.
-          // So if history contains [State A, State B], and we are at State C.
-          // If Move(State C) -> State B, that is Ko.
-          // App uses simple state: 'board' is current.
-          // So we check against `board`. No.
-          // We need to pass the board from *one turn ago*.
-          // If history is [T0, T1], and current is T2.
-          // If T2 + Move == T1, it is Ko.
-          // So we pass history[history.length - 1]?.board (which is state before T2) to check?
-          // No, simple Ko: You capture, opponent cannot immediately recapture.
-          // Board state cannot repeat.
-          // So newBoard !== previousBoard.
-          // The `board` variable IS the previous board relative to the *new* move.
-          // So if attemptMove returns newBoard === board, that's impossible anyway.
-          // Ko is: newBoard === history[history.length - 1].board.
-          if (history.length > 0) {
-             prevHash = getBoardHash(history[history.length - 1].board);
-          }
+         prevHash = getBoardHash(history[history.length - 1].board);
       }
-
-      // We only save history right before mutating state in `executeMove`? 
-      // No, `executeMove` is called. We should save history *before* applying changes.
-      // But inside this callback `history` might be stale.
-      // Refactoring: `saveHistory` needs to happen before state update.
-      // However, React state updates are batched. 
-      // Let's use functional update for history in the setBoard block or separate effect?
-      // Better: executeMove creates the new state, then we update everything.
 
       const result = attemptMove(currentBoard, x, y, activePlayer, currentType, prevHash);
       
       if (result) {
+          // Play SFX
+          if (result.captured > 0) playSfx('capture');
+          else playSfx('move');
+
           // Save History (Local only)
           if (!isRemote) {
              setHistory(prev => [...prev, {
@@ -286,7 +296,8 @@ const App: React.FC = () => {
           // Update Board
           setBoard(result.newBoard);
           setLastMove({ x, y });
-          setConsecutivePasses(0);
+          setConsecutivePasses(0); // Reset consecutive passes on any move
+          setPassNotificationDismissed(false); // Reset notification state on move
 
           // Update Score
           if (result.captured > 0) {
@@ -305,23 +316,31 @@ const App: React.FC = () => {
 
           // Switch Player
           setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
+      } else {
+          // Move was invalid
+          if (!isRemote) playSfx('error');
       }
-  }, [blackCaptures, whiteCaptures, lastMove, consecutivePasses, history]); // added history dep
+  }, [blackCaptures, whiteCaptures, lastMove, consecutivePasses, history]); 
 
   const handleIntersectionClick = useCallback((x: number, y: number) => {
-    if (gameOver || showPassModal || isThinking) return;
+    // If game is over or AI is thinking, block interaction
+    if (gameOver || isThinking) return;
+    
+    // NOTE: We do NOT block if 'consecutivePasses > 0'. 
+    // Player is allowed to play to break the pass sequence.
+
     if (gameMode === 'PvAI' && currentPlayer === 'white') return;
     
     // Online Check
     if (onlineStatus === 'connected') {
-        if (currentPlayer !== myColor) return; // Not my turn
+        if (currentPlayer !== myColor) return; 
         connection?.send({ type: 'MOVE', x, y });
     }
 
     // Execute Move locally
     executeMove(x, y, false);
 
-  }, [gameOver, showPassModal, gameMode, currentPlayer, onlineStatus, myColor, connection, executeMove, isThinking]);
+  }, [gameOver, gameMode, currentPlayer, onlineStatus, myColor, connection, executeMove, isThinking]);
 
   const handlePass = useCallback((isRemote: boolean = false) => {
     if (gameOver) return;
@@ -350,7 +369,7 @@ const App: React.FC = () => {
         const newPasses = prev + 1;
         // Check for game end condition inside setter to ensure we have latest count
         if (newPasses >= 2) {
-             // Defer the score calculation slightly to let render finish
+             // Game Over due to 2 passes
              setTimeout(() => {
                 const score = calculateScore(boardRef.current);
                 setFinalScore(score);
@@ -364,13 +383,9 @@ const App: React.FC = () => {
         }
         return newPasses;
     });
-
-    if (activePlayer === 'white' && gameMode === 'PvAI') {
-        // AI Pass handling visual
-        setShowPassModal(true);
-    } else if (isRemote) {
-        setShowPassModal(true);
-    }
+    
+    // Reset notification state whenever a pass occurs (so it shows up again if it was dismissed before)
+    setPassNotificationDismissed(false); 
 
     if (consecutivePasses < 1) {
          setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
@@ -383,6 +398,18 @@ const App: React.FC = () => {
     setGameOver(true);
     setWinner(winner);
     setWinReason(reason);
+    
+    // Play sound based on result
+    if (gameMode === 'PvAI') {
+        if (winner === 'black') playSfx('win');
+        else playSfx('lose');
+    } else if (onlineStatus === 'connected') {
+        if (winner === myColor) playSfx('win');
+        else playSfx('lose');
+    } else {
+        // PvP always happy sound
+        playSfx('win'); 
+    }
   };
 
   // AI Turn Handling
@@ -391,7 +418,6 @@ const App: React.FC = () => {
       setIsThinking(true);
       const timer = setTimeout(() => {
         // AI Logic
-        // Calculate Ko Hash from history (AI needs to avoid this)
         let prevHash = null;
         if (history.length > 0) prevHash = getBoardHash(history[history.length-1].board);
 
@@ -419,6 +445,7 @@ const App: React.FC = () => {
     setWinner(null);
     setWinReason('');
     setConsecutivePasses(0);
+    setPassNotificationDismissed(false);
     setFinalScore(null);
     setHistory([]);
     setShowMenu(false);
@@ -443,7 +470,7 @@ const App: React.FC = () => {
       <audio 
         ref={bgmRef} 
         loop 
-        src="https://ia800504.us.archive.org/11/items/Kevin_MacLeod_-_Daily_Beetle/Daily_Beetle.mp3" 
+        src="/bgm.mp3" 
       />
 
       {/* --- TABLET/DESKTOP LAYOUT: Left Side Board --- */}
@@ -456,6 +483,7 @@ const App: React.FC = () => {
                     currentPlayer={currentPlayer}
                     lastMove={lastMove}
                     showQi={showQi}
+                    gameType={gameType}
                 />
              </div>
           </div>
@@ -467,11 +495,42 @@ const App: React.FC = () => {
               </div>
           )}
 
-           {/* Pass Indicator overlay */}
-          {consecutivePasses === 1 && !gameOver && (
-              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/60 text-white px-6 py-3 rounded-2xl backdrop-blur-md animate-bounce z-30 font-bold pointer-events-none">
-                  {lastMove === null ? '对手停着' : '停着'} - 再停一次结束
-              </div>
+           {/* Stylized Pass Indicator Overlay - Dismissible */}
+          {consecutivePasses === 1 && !gameOver && !passNotificationDismissed && (
+              <>
+                {/* Backdrop to dismiss */}
+                <div 
+                    className="absolute inset-0 z-20 cursor-pointer" 
+                    onClick={() => setPassNotificationDismissed(true)}
+                ></div>
+                
+                {/* Modal */}
+                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-[#fff8e1] border-4 border-[#cba367] text-[#5c4033] px-6 py-6 rounded-3xl shadow-2xl z-30 flex flex-col items-center animate-in zoom-in duration-300 w-64 pointer-events-auto">
+                    <div className="flex items-center gap-2 mb-4">
+                        <AlertCircle size={28} className="text-[#cba367]" />
+                        <span className="text-xl font-black">对手停着</span>
+                    </div>
+                    <p className="text-xs font-bold text-gray-500 text-center mb-6 leading-relaxed">
+                        对手认为无需再落子。<br/>
+                        点击空白处可继续落子。
+                    </p>
+                    
+                    <div className="flex flex-col gap-3 w-full">
+                        <button 
+                            onClick={() => setPassNotificationDismissed(true)}
+                            className="w-full bg-green-500 hover:bg-green-600 text-white py-3 rounded-xl font-bold shadow-sm active:scale-95 transition-all flex items-center justify-center gap-2"
+                        >
+                            <Play size={16} fill="currentColor" /> 继续落子
+                        </button>
+                        <button 
+                            onClick={() => handlePass(false)}
+                            className="w-full bg-[#cba367] hover:bg-[#b89258] text-white py-3 rounded-xl font-bold shadow-sm active:scale-95 transition-all flex items-center justify-center gap-2"
+                        >
+                            <SkipForward size={16} fill="currentColor" /> 我也停着 (结算)
+                        </button>
+                    </div>
+                </div>
+              </>
           )}
       </div>
 
@@ -556,10 +615,10 @@ const App: React.FC = () => {
 
             <button 
             onClick={() => handlePass(false)}
-            disabled={gameOver || showPassModal || (onlineStatus === 'connected' && currentPlayer !== myColor)}
-            className="flex flex-col items-center justify-center gap-1 bg-[#8c6b38] text-white p-3 rounded-xl shadow-sm font-bold hover:bg-[#7a5c30] active:scale-95 transition-all border-b-4 border-[#5c4033] disabled:opacity-50 disabled:active:scale-100"
+            disabled={gameOver || (onlineStatus === 'connected' && currentPlayer !== myColor)}
+            className={`flex flex-col items-center justify-center gap-1 text-white p-3 rounded-xl shadow-sm font-bold active:scale-95 transition-all border-b-4 disabled:opacity-50 disabled:active:scale-100 ${consecutivePasses === 1 ? 'bg-red-500 hover:bg-red-600 border-red-700 animate-pulse' : 'bg-[#8c6b38] hover:bg-[#7a5c30] border-[#5c4033]'}`}
             >
-            <SkipForward size={20} /> <span className="text-xs">停着</span>
+            <SkipForward size={20} /> <span className="text-xs">{consecutivePasses === 1 ? '结束结算' : '停着'}</span>
             </button>
             
             <button 
