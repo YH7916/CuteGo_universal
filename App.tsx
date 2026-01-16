@@ -3,7 +3,9 @@ import { GameBoard } from './components/GameBoard';
 import { BoardState, Player, GameMode, GameType, BoardSize, Difficulty } from './types';
 import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore, calculateWinRate } from './utils/goLogic';
 import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull, Undo2, AlertCircle, X } from 'lucide-react';
-import Peer, { DataConnection } from 'peerjs';
+
+// --- Configuration ---
+const WORKER_URL = 'https://cute-go-signaling.3240106155.workers.dev';
 
 // Types for P2P Messages
 type PeerMessage = 
@@ -57,12 +59,14 @@ const App: React.FC = () => {
   const [showOnlineMenu, setShowOnlineMenu] = useState(false);
   const [peerId, setPeerId] = useState<string>('');
   const [remotePeerId, setRemotePeerId] = useState<string>('');
-  const [connection, setConnection] = useState<DataConnection | null>(null);
   const [onlineStatus, setOnlineStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const [myColor, setMyColor] = useState<Player | null>(null);
   const [copied, setCopied] = useState(false);
-  const peerRef = useRef<Peer | null>(null);
-  const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // WebRTC Refs
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const pollingRef = useRef<number | null>(null);
   
   // Audio Refs
   const bgmRef = useRef<HTMLAudioElement | null>(null);
@@ -153,140 +157,181 @@ const App: React.FC = () => {
       return str;
   };
 
-  // --- Online Logic ---
+  // --- Online Logic (WebRTC + Cloudflare Workers) ---
   
-  // Timeout for connecting state
+  // Cleanup on unmount or disconnect
   useEffect(() => {
-      if (onlineStatus === 'connecting') {
-          // Set a 15 second timeout to abort connection if it hangs
-          connectionTimeoutRef.current = setTimeout(() => {
-              if (onlineStatusRef.current === 'connecting') {
-                  setOnlineStatus('disconnected');
-                  setConnection(null);
-                  alert('连接超时！请检查双方网络环境，或重试。');
-                  // Close connection attempt if exists
-                  if (connection) {
-                      try { connection.close(); } catch(e) {}
-                  }
-              }
-          }, 15000);
-      } else {
-          if (connectionTimeoutRef.current) {
-              clearTimeout(connectionTimeoutRef.current);
-              connectionTimeoutRef.current = null;
-          }
-      }
       return () => {
-          if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+          if (pollingRef.current) clearInterval(pollingRef.current);
+          if (pcRef.current) pcRef.current.close();
       };
-  }, [onlineStatus]);
+  }, []);
 
+  // Auto-create room when menu opens if not connected
   useEffect(() => {
-    if (showOnlineMenu && !peerRef.current) {
-        // Generate a random 6-digit ID
-        const id = Math.floor(100000 + Math.random() * 900000).toString();
+      if (showOnlineMenu && !peerId && onlineStatus === 'disconnected') {
+          createRoom();
+      }
+  }, [showOnlineMenu, peerId, onlineStatus]);
+
+  const setupDataChannel = (dc: RTCDataChannel) => {
+    dataChannelRef.current = dc;
+    
+    dc.onopen = () => {
+        // If we were connecting, we are now fully connected
+        setOnlineStatus('connected');
+        setShowOnlineMenu(false);
+        setShowMenu(false);
+        setGameMode('PvP');
         
-        // Configure Peer with EXTENDED STUN servers list
-        const peer = new Peer(id, {
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' },
-                    { urls: 'stun:stun3.l.google.com:19302' },
-                    { urls: 'stun:stun4.l.google.com:19302' },
-                    { urls: 'stun:global.stun.twilio.com:3478' } // Add Twilio public STUN
-                ]
-            }
-        });
-        
-        peer.on('open', (id) => {
-            setPeerId(id);
-        });
+        // If I am Host (indicated by having myColor === 'black' set in startPolling success), 
+        // I need to sync game state now that the channel is open.
+        // Wait, myColor might be set asynchronously in startPolling. 
+        // A safer check: if I created the room (have a peerId) and I am connected.
+        // But startPolling sets myColor='black'.
+        if (myColorRef.current === 'black') {
+             sendData({ 
+                type: 'SYNC', 
+                boardSize, 
+                gameType: gameTypeRef.current, 
+                startColor: 'white' 
+            });
+            // We don't resetGame here because Host already reset in startPolling
+        }
+    };
 
-        peer.on('connection', (conn) => {
-            // Close any existing connection if a new one comes in? 
-            // For now, just accept the new one.
-            handleConnection(conn, true);
-        });
-
-        peer.on('error', (err) => {
-             console.error("PeerJS Error:", err);
-             // Suppress annoying errors once connected or if closed manually
-             if (err.type === 'peer-unavailable') {
-                 // Do nothing, handled by connection close/timeout usually
-             } else if (err.type === 'unavailable-id') {
-                 // Rare with 6 digits
-                 alert('ID冲突，请刷新重试');
-             }
-        });
-
-        peerRef.current = peer;
-    }
-  }, [showOnlineMenu]);
-
-  const handleConnection = (conn: DataConnection, isHost: boolean) => {
-      // Clean up old connection listener if any (logic handled by react state update mostly)
-      setConnection(conn);
-      setOnlineStatus('connecting');
-
-      conn.on('open', () => {
-          setOnlineStatus('connected');
-          setShowOnlineMenu(false);
-          setShowMenu(false);
-          setGameMode('PvP'); 
-          
-          if (isHost) {
-              setMyColor('black');
-              // Give a tiny delay to ensure 'open' is processed on other side
-              setTimeout(() => {
-                conn.send({ 
-                    type: 'SYNC', 
-                    boardSize, 
-                    gameType: gameTypeRef.current, 
-                    startColor: 'white' 
-                });
-                resetGame(true); 
-              }, 500);
-          }
-      });
-
-      conn.on('data', (data: any) => {
-          const msg = data as PeerMessage;
-          if (msg.type === 'MOVE') {
-              executeMove(msg.x, msg.y, true); 
-          } else if (msg.type === 'PASS') {
-              handlePass(true);
-          } else if (msg.type === 'SYNC') {
-              setBoardSize(msg.boardSize);
-              setGameType(msg.gameType);
-              setMyColor(msg.startColor);
-              resetGame(true);
-          } else if (msg.type === 'RESTART') {
-              resetGame(true);
-          }
-      });
-
-      conn.on('close', () => {
-          setOnlineStatus('disconnected');
-          setConnection(null);
-          // Only alert if we were actually connected or connecting
-          if (onlineStatusRef.current === 'connected') {
-             alert('对方已断开连接');
-          }
-      });
-      
-      conn.on('error', (err) => {
-          console.error("Connection Error:", err);
-          // Don't change status here, let 'close' or timeout handle it to avoid flickering
-      });
+    dc.onmessage = (e) => {
+        const msg = JSON.parse(e.data) as PeerMessage;
+        if (msg.type === 'MOVE') {
+            executeMove(msg.x, msg.y, true);
+        } else if (msg.type === 'PASS') {
+            handlePass(true);
+        } else if (msg.type === 'SYNC') {
+            setBoardSize(msg.boardSize);
+            setGameType(msg.gameType);
+            setMyColor(msg.startColor);
+            resetGame(true);
+        } else if (msg.type === 'RESTART') {
+            resetGame(true);
+        }
+    };
+    
+    dc.onclose = () => {
+        setOnlineStatus('disconnected');
+        alert("对方已断开连接");
+        setMyColor(null);
+        if (pollingRef.current) clearInterval(pollingRef.current);
+    };
   };
 
-  const connectToPeer = () => {
-      if (!peerRef.current || !remotePeerId) return;
-      // Force reliable mode
-      const conn = peerRef.current.connect(remotePeerId, { reliable: true });
-      handleConnection(conn, false);
+  const sendData = (msg: PeerMessage) => {
+    if (dataChannelRef.current?.readyState === 'open') {
+        dataChannelRef.current.send(JSON.stringify(msg));
+    }
+  };
+
+  const createRoom = async () => {
+    if (pcRef.current && pcRef.current.signalingState !== 'closed') return; // Already setup or active
+
+    const id = Math.floor(100000 + Math.random() * 900000).toString();
+    setPeerId(id);
+    
+    // We don't set status to 'connecting' yet to avoid blocking the ID display
+    // The user needs to see the ID to share it.
+
+    const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+    pcRef.current = pc;
+
+    const dc = pc.createDataChannel("game-channel");
+    setupDataChannel(dc);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    try {
+        await fetch(`${WORKER_URL}/create-room`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ roomId: id, sdp: offer })
+        });
+        startPolling(id);
+    } catch (e) {
+        console.error("Signal Error", e);
+        // Don't alert immediately, might be temporary network blip
+    }
+  };
+
+  const startPolling = (id: string) => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    pollingRef.current = window.setInterval(async () => {
+        try {
+            const res = await fetch(`${WORKER_URL}/check-status?roomId=${id}`);
+            const data = await res.json();
+            if (data && data.status === 'connected' && data.guestSdp) {
+                if (pollingRef.current) clearInterval(pollingRef.current);
+                await pcRef.current?.setRemoteDescription(new RTCSessionDescription(data.guestSdp));
+                
+                // HOST LOGIC:
+                // Once remote description is set, ICE checks will finish and channel will open.
+                // We prepare the game state here.
+                setOnlineStatus('connected');
+                setMyColor('black');
+                setShowOnlineMenu(false);
+                resetGame(true);
+            }
+        } catch (e) {
+            console.error("Polling Error", e);
+        }
+    }, 3000);
+  };
+
+  const joinRoom = async () => {
+    if (!remotePeerId) return;
+    setOnlineStatus('connecting');
+
+    const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+    pcRef.current = pc;
+
+    pc.ondatachannel = (event) => setupDataChannel(event.channel);
+
+    try {
+        const res = await fetch(`${WORKER_URL}/join-room`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ roomId: remotePeerId })
+        });
+        
+        if (!res.ok) {
+            alert("房间不存在或已过期");
+            setOnlineStatus('disconnected');
+            pc.close();
+            pcRef.current = null;
+            return;
+        }
+
+        const { hostSdp } = await res.json();
+        await pc.setRemoteDescription(new RTCSessionDescription(hostSdp));
+        
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        await fetch(`${WORKER_URL}/join-room`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ roomId: remotePeerId, guestSdp: answer })
+        });
+
+        setMyColor('white');
+        // Connection will open shortly via ICE
+    } catch (e) {
+        console.error("Join Error", e);
+        setOnlineStatus('disconnected');
+        alert("加入失败，请检查网络或房间号");
+    }
   };
 
   const copyId = () => {
@@ -402,13 +447,13 @@ const App: React.FC = () => {
     // Online Check
     if (onlineStatus === 'connected') {
         if (currentPlayer !== myColor) return; 
-        connection?.send({ type: 'MOVE', x, y });
+        sendData({ type: 'MOVE', x, y });
     }
 
     // Execute Move locally
     executeMove(x, y, false);
 
-  }, [gameOver, gameMode, currentPlayer, onlineStatus, myColor, connection, executeMove, isThinking]);
+  }, [gameOver, gameMode, currentPlayer, onlineStatus, myColor, executeMove, isThinking]);
 
   const handlePass = useCallback((isRemote: boolean = false) => {
     if (gameOver) return;
@@ -428,7 +473,7 @@ const App: React.FC = () => {
     // Online sync
     if (onlineStatusRef.current === 'connected' && !isRemote) {
         if (currentPlayerRef.current !== myColorRef.current) return;
-        connection?.send({ type: 'PASS' });
+        sendData({ type: 'PASS' });
     }
 
     const activePlayer = currentPlayerRef.current;
@@ -460,7 +505,7 @@ const App: React.FC = () => {
          setLastMove(null);
     }
 
-  }, [gameOver, gameMode, connection, consecutivePasses, blackCaptures, whiteCaptures, lastMove]); 
+  }, [gameOver, gameMode, consecutivePasses, blackCaptures, whiteCaptures, lastMove]); 
 
   const endGame = (winner: Player, reason: string) => {
     setGameOver(true);
@@ -521,7 +566,18 @@ const App: React.FC = () => {
     setIsThinking(false);
     
     if (onlineStatusRef.current === 'connected' && !keepOnline) {
-        connection?.send({ type: 'RESTART' });
+        sendData({ type: 'RESTART' });
+    }
+    
+    // If fully resetting (disconnecting), clear online state
+    if (!keepOnline) {
+        setOnlineStatus('disconnected');
+        setMyColor(null);
+        if (pollingRef.current) clearInterval(pollingRef.current);
+        if (pcRef.current) {
+            pcRef.current.close();
+            pcRef.current = null;
+        }
     }
   };
 
@@ -714,7 +770,7 @@ const App: React.FC = () => {
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">模式</label>
                 <div className="grid grid-cols-2 gap-2">
                     {(['Go', 'Gomoku'] as GameType[]).map(t => (
-                        <button key={t} onClick={() => { setGameType(t); if(onlineStatus === 'connected') connection?.close(); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${gameType === t ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
+                        <button key={t} onClick={() => { setGameType(t); if(onlineStatus === 'connected') sendData({type: 'RESTART'}); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${gameType === t ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
                            {t === 'Go' ? '围棋' : '五子棋'}
                         </button>
                     ))}
@@ -724,10 +780,10 @@ const App: React.FC = () => {
             <div className="space-y-1">
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">玩家</label>
                 <div className="grid grid-cols-2 gap-2">
-                     <button onClick={() => { setGameMode('PvP'); setOnlineStatus('disconnected'); connection?.close(); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${gameMode === 'PvP' && onlineStatus !== 'connected' ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
+                     <button onClick={() => { setGameMode('PvP'); resetGame(false); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${gameMode === 'PvP' && onlineStatus !== 'connected' ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
                         本地双人
                     </button>
-                    <button onClick={() => { setGameMode('PvAI'); setOnlineStatus('disconnected'); connection?.close(); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${gameMode === 'PvAI' ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
+                    <button onClick={() => { setGameMode('PvAI'); resetGame(false); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${gameMode === 'PvAI' ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
                         人机对战
                     </button>
                 </div>
@@ -791,7 +847,7 @@ const App: React.FC = () => {
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">棋盘大小</label>
                 <div className="grid grid-cols-3 gap-2">
                     {[9, 13, 19].map((size) => (
-                        <button key={size} onClick={() => { setBoardSize(size as BoardSize); if(onlineStatus==='connected') connection?.close(); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${boardSize === size ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
+                        <button key={size} onClick={() => { setBoardSize(size as BoardSize); if(onlineStatus==='connected') sendData({type: 'RESTART'}); }} className={`py-2 rounded-xl font-bold text-sm border-2 ${boardSize === size ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
                             {size}路
                         </button>
                     ))}
@@ -844,7 +900,7 @@ const App: React.FC = () => {
                        className="flex-1 bg-gray-100 border-2 border-transparent focus:border-[#cba367] rounded-xl px-4 py-2 font-mono outline-none transition-colors"
                      />
                      <button 
-                        onClick={connectToPeer}
+                        onClick={joinRoom}
                         disabled={!remotePeerId || onlineStatus === 'connecting'}
                         className="bg-[#cba367] text-white px-4 py-2 rounded-xl font-bold shadow-md hover:bg-[#b89258] disabled:opacity-50"
                      >
