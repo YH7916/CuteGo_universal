@@ -155,7 +155,8 @@ const App: React.FC = () => {
   // --- Online Logic ---
   useEffect(() => {
     if (showOnlineMenu && !peerRef.current) {
-        const id = 'puyo-' + Math.floor(Math.random() * 1000000).toString();
+        // Generate a random 6-digit ID
+        const id = Math.floor(100000 + Math.random() * 900000).toString();
         const peer = new Peer(id);
         
         peer.on('open', (id) => {
@@ -164,6 +165,12 @@ const App: React.FC = () => {
 
         peer.on('connection', (conn) => {
             handleConnection(conn, true);
+        });
+
+        peer.on('error', (err) => {
+             console.error("PeerJS Error:", err);
+             // If ID is taken (rare with 6 digits but possible), retry could be implemented, 
+             // but for simplicity we let user reopen menu.
         });
 
         peerRef.current = peer;
@@ -212,6 +219,13 @@ const App: React.FC = () => {
           setOnlineStatus('disconnected');
           setConnection(null);
           alert('对方已断开连接');
+      });
+      
+      conn.on('error', (err) => {
+          console.error("Connection Error:", err);
+          setOnlineStatus('disconnected');
+          setConnection(null);
+          alert('连接发生错误');
       });
   };
 
@@ -772,7 +786,7 @@ const App: React.FC = () => {
                      <input 
                        value={remotePeerId}
                        onChange={(e) => setRemotePeerId(e.target.value)}
-                       placeholder="输入好友的邀请码"
+                       placeholder="输入好友的邀请码 (6位数字)"
                        className="flex-1 bg-gray-100 border-2 border-transparent focus:border-[#cba367] rounded-xl px-4 py-2 font-mono outline-none transition-colors"
                      />
                      <button 
