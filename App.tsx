@@ -157,7 +157,19 @@ const App: React.FC = () => {
     if (showOnlineMenu && !peerRef.current) {
         // Generate a random 6-digit ID
         const id = Math.floor(100000 + Math.random() * 900000).toString();
-        const peer = new Peer(id);
+        
+        // Configure Peer with explicit STUN servers to allow Cross-Network (WAN) connections
+        const peer = new Peer(id, {
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' },
+                    { urls: 'stun:stun4.l.google.com:19302' },
+                ]
+            }
+        });
         
         peer.on('open', (id) => {
             setPeerId(id);
@@ -169,8 +181,7 @@ const App: React.FC = () => {
 
         peer.on('error', (err) => {
              console.error("PeerJS Error:", err);
-             // If ID is taken (rare with 6 digits but possible), retry could be implemented, 
-             // but for simplicity we let user reopen menu.
+             // Common error: ID taken (unlikely with 6 digits) or network fail
         });
 
         peerRef.current = peer;
@@ -225,7 +236,7 @@ const App: React.FC = () => {
           console.error("Connection Error:", err);
           setOnlineStatus('disconnected');
           setConnection(null);
-          alert('连接发生错误');
+          alert('连接发生错误，请检查网络');
       });
   };
 
