@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameBoard } from './components/GameBoard';
 import { BoardState, Player, GameMode, GameType, BoardSize, Difficulty } from './types';
-import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore } from './utils/goLogic';
-import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind } from 'lucide-react';
+import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore, calculateWinRate } from './utils/goLogic';
+import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
 
 // Types for P2P Messages
@@ -18,7 +18,9 @@ const App: React.FC = () => {
   const [gameType, setGameType] = useState<GameType>('Go');
   const [gameMode, setGameMode] = useState<GameMode>('PvP'); // PvP, PvAI, Online
   const [difficulty, setDifficulty] = useState<Difficulty>('Medium');
-  const [showQi, setShowQi] = useState<boolean>(false); // New: Qi aura visualization
+  const [showQi, setShowQi] = useState<boolean>(false);
+  const [showWinRate, setShowWinRate] = useState<boolean>(true); // Win rate toggle
+  const [musicVolume, setMusicVolume] = useState<number>(0.3); // 0.0 to 1.0
 
   // Game State
   const [board, setBoard] = useState<BoardState>(createBoard(9));
@@ -45,6 +47,9 @@ const App: React.FC = () => {
   const [myColor, setMyColor] = useState<Player | null>(null);
   const [copied, setCopied] = useState(false);
   const peerRef = useRef<Peer | null>(null);
+  
+  // Audio Ref
+  const bgmRef = useRef<HTMLAudioElement | null>(null);
 
   // Refs for State (Fix for Stale Closures & Logic Synchronization)
   const boardRef = useRef(board);
@@ -58,6 +63,18 @@ const App: React.FC = () => {
   useEffect(() => { gameTypeRef.current = gameType; }, [gameType]);
   useEffect(() => { myColorRef.current = myColor; }, [myColor]);
   useEffect(() => { onlineStatusRef.current = onlineStatus; }, [onlineStatus]);
+
+  // Handle BGM
+  useEffect(() => {
+    if (bgmRef.current) {
+        bgmRef.current.volume = musicVolume;
+        if (musicVolume > 0 && bgmRef.current.paused) {
+             bgmRef.current.play().catch(e => console.log("Auto-play blocked", e));
+        } else if (musicVolume === 0) {
+            bgmRef.current.pause();
+        }
+    }
+  }, [musicVolume]);
 
   useEffect(() => {
     resetGame();
@@ -142,7 +159,6 @@ const App: React.FC = () => {
 
   // Unified Move Execution Logic (Local & Remote)
   const executeMove = useCallback((x: number, y: number, isRemote: boolean) => {
-      // Always calculate using the LATEST refs to avoid stale state in callbacks
       const currentBoard = boardRef.current;
       const activePlayer = currentPlayerRef.current;
       const currentType = gameTypeRef.current;
@@ -155,7 +171,7 @@ const App: React.FC = () => {
           setLastMove({ x, y });
           setConsecutivePasses(0);
 
-          // Update Score - Critical: Use functional update to ensure we have the latest previous value
+          // Update Score
           if (result.captured > 0) {
               if (activePlayer === 'black') {
                   setBlackCaptures(prev => prev + result.captured);
@@ -226,8 +242,6 @@ const App: React.FC = () => {
         setShowPassModal(true);
     }
 
-    // Switch player if game isn't ending
-    // Note: We don't have newPasses here easily without ref, but logic implies < 2 switch
     if (consecutivePasses < 1) {
          setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
          setLastMove(null);
@@ -245,11 +259,15 @@ const App: React.FC = () => {
   useEffect(() => {
     if (gameMode === 'PvAI' && currentPlayer === 'white' && !gameOver && !showPassModal) {
       const timer = setTimeout(() => {
+        // NOTE: In a real implementation, you would check difficulty here.
+        // If 'Hell' and using an external API, await fetch(...)
+        // Since we are using local simulation:
         const move = getAIMove(board, 'white', gameType, difficulty);
+        
         if (move) {
-           // AI executes move via the same unified function
            executeMove(move.x, move.y, false);
         } else {
+           // AI passes if no useful moves found (avoids endless game)
            handlePass();
         }
       }, 700);
@@ -279,16 +297,26 @@ const App: React.FC = () => {
   const isPvAILoss = gameMode === 'PvAI' && winner === 'white';
   const isOnlineLoss = onlineStatus === 'connected' && winner !== myColor;
 
+  // Calculate Win Rate for UI
+  const winRate = showWinRate && !gameOver ? calculateWinRate(board) : 50;
+
   return (
     <div className="h-full w-full bg-[#f7e7ce] flex flex-col items-center relative select-none overflow-hidden">
       
-      {/* Header - Compact padding */}
+      {/* Background Audio */}
+      <audio 
+        ref={bgmRef} 
+        loop 
+        src="https://cdn.pixabay.com/download/audio/2023/04/26/audio_959353995f.mp3?filename=cute-background-music-148186.mp3" 
+      />
+
+      {/* Header */}
       <div className="w-full max-w-md px-4 py-2 flex justify-between items-center z-20 shrink-0">
         <div className="flex flex-col">
             <span className="font-bold text-gray-700 text-lg leading-tight flex items-center gap-2">
                {gameType === 'Go' ? '围棋' : '五子棋'}
                <span className="text-xs font-normal text-gray-500 bg-white/50 px-2 py-0.5 rounded-full border border-gray-200">
-                 {boardSize}路 • {onlineStatus === 'connected' ? '在线' : (gameMode === 'PvAI' ? '人机' : '本地')}
+                 {boardSize}路 • {difficulty === 'Hell' ? '地狱AI' : (onlineStatus === 'connected' ? '在线' : (gameMode === 'PvAI' ? '人机' : '本地'))}
                </span>
                {onlineStatus === 'connected' && (
                     <span className="relative flex h-2 w-2">
@@ -307,28 +335,44 @@ const App: React.FC = () => {
         </button>
       </div>
 
-      {/* Score - Compact spacing */}
-      <div className="w-full max-w-md px-4 mb-1 z-20 grid grid-cols-2 gap-2 shrink-0">
-         {/* Black Player Pill */}
-         <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'black' ? 'bg-black/10 border-black/20 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'black' ? 'ring-2 ring-blue-400' : ''}`}>
-             <div className="w-6 h-6 rounded-full bg-[#2a2a2a] shadow-inner border-2 border-[#444] shrink-0"></div>
-             <div className="flex flex-col">
-                 <span className="font-bold text-gray-800 text-sm">黑子 {onlineStatus === 'connected' && myColor === 'black' && '(我)'}</span>
-                 {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {blackCaptures}</span>}
-             </div>
-         </div>
+      {/* Score */}
+      <div className="w-full max-w-md px-4 mb-1 z-20 flex flex-col gap-1 shrink-0">
+        <div className="grid grid-cols-2 gap-2">
+            {/* Black */}
+            <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'black' ? 'bg-black/10 border-black/20 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'black' ? 'ring-2 ring-blue-400' : ''}`}>
+                <div className="w-6 h-6 rounded-full bg-[#2a2a2a] shadow-inner border-2 border-[#444] shrink-0"></div>
+                <div className="flex flex-col">
+                    <span className="font-bold text-gray-800 text-sm">黑子 {onlineStatus === 'connected' && myColor === 'black' && '(我)'}</span>
+                    {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {blackCaptures}</span>}
+                </div>
+            </div>
 
-         {/* White Player Pill */}
-         <div className={`flex items-center justify-end gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'white' ? 'bg-white/60 border-white/50 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'white' ? 'ring-2 ring-blue-400' : ''}`}>
-             <div className="flex flex-col items-end">
-                 <span className="font-bold text-gray-800 text-sm">白子 {onlineStatus === 'connected' && myColor === 'white' && '(我)'}</span>
-                 {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {whiteCaptures}</span>}
-             </div>
-             <div className="w-6 h-6 rounded-full bg-[#f0f0f0] shadow-inner border-2 border-white shrink-0"></div>
-         </div>
+            {/* White */}
+            <div className={`flex items-center justify-end gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'white' ? 'bg-white/60 border-white/50 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'white' ? 'ring-2 ring-blue-400' : ''}`}>
+                <div className="flex flex-col items-end">
+                    <span className="font-bold text-gray-800 text-sm">白子 {onlineStatus === 'connected' && myColor === 'white' && '(我)'}</span>
+                    {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {whiteCaptures}</span>}
+                </div>
+                <div className="w-6 h-6 rounded-full bg-[#f0f0f0] shadow-inner border-2 border-white shrink-0"></div>
+            </div>
+        </div>
+
+        {/* Win Rate Bar */}
+        {showWinRate && gameType === 'Go' && (
+            <div className="w-full h-1.5 bg-white/50 rounded-full overflow-hidden flex shadow-inner">
+                <div 
+                    className="h-full bg-gray-800 transition-all duration-1000 ease-in-out" 
+                    style={{ width: `${winRate}%` }}
+                />
+                <div 
+                    className="h-full bg-white transition-all duration-1000 ease-in-out" 
+                    style={{ width: `${100 - winRate}%` }}
+                />
+            </div>
+        )}
       </div>
 
-      {/* Board - Grow to fill space */}
+      {/* Board */}
       <div className="relative z-10 flex-grow flex items-center justify-center w-full overflow-hidden min-h-0">
         <div className="transform transition-transform">
             <GameBoard 
@@ -341,7 +385,7 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Controls - Compact padding */}
+      {/* Controls */}
       <div className="w-full max-w-md px-6 py-4 flex justify-center gap-3 z-20 shrink-0">
          <button 
            onClick={() => handlePass(false)}
@@ -359,27 +403,10 @@ const App: React.FC = () => {
          </button>
       </div>
 
-      {/* Pass Modal */}
-      {showPassModal && (
-        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in zoom-in duration-200">
-           <div className="bg-white p-6 rounded-3xl shadow-2xl flex flex-col items-center w-72 border-4 border-[#8c6b38]">
-               <SkipForward size={48} className="text-[#8c6b38] mb-2" />
-               <h2 className="text-2xl font-black text-gray-800 mb-2">对方停着</h2>
-               <p className="text-gray-500 font-semibold mb-6 text-center text-sm">轮到你了，请落子或停着。</p>
-               <button 
-                  onClick={() => setShowPassModal(false)}
-                  className="w-full bg-[#cba367] text-white px-8 py-3 rounded-xl font-bold shadow-lg hover:bg-[#b89258] transition-all active:scale-95 flex items-center justify-center gap-2"
-               >
-                  <Play size={18} fill="currentColor"/> 继续游戏
-               </button>
-           </div>
-        </div>
-      )}
-
       {/* Settings Modal */}
       {showMenu && (
         <div className="absolute inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border-4 border-[#e3c086] flex flex-col gap-4">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border-4 border-[#e3c086] flex flex-col gap-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
             <div className="flex justify-between items-center border-b pb-2">
                 <h2 className="text-2xl font-black text-[#5c4033] tracking-wide">游戏设置</h2>
                 <button onClick={() => setShowMenu(false)} className="text-gray-400 hover:text-gray-600 font-bold">关闭</button>
@@ -414,15 +441,50 @@ const App: React.FC = () => {
             {gameMode === 'PvAI' && (
                 <div className="space-y-1">
                     <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">人机难度</label>
-                    <div className="grid grid-cols-3 gap-2">
-                        {(['Easy', 'Medium', 'Hard'] as Difficulty[]).map(d => (
-                            <button key={d} onClick={() => setDifficulty(d)} className={`py-2 rounded-xl font-bold text-xs border-2 ${difficulty === d ? 'border-[#cba367] bg-orange-50 text-[#8c6b38]' : 'border-transparent bg-gray-100 text-gray-400'}`}>
-                                {d === 'Easy' ? '简单' : d === 'Medium' ? '中等' : '困难'}
+                    <div className="grid grid-cols-4 gap-2">
+                        {(['Easy', 'Medium', 'Hard', 'Hell'] as Difficulty[]).map(d => (
+                            <button key={d} onClick={() => setDifficulty(d)} className={`py-2 rounded-xl font-bold text-[10px] sm:text-xs border-2 ${difficulty === d ? (d === 'Hell' ? 'border-red-500 bg-red-50 text-red-600' : 'border-[#cba367] bg-orange-50 text-[#8c6b38]') : 'border-transparent bg-gray-100 text-gray-400'}`}>
+                                {d === 'Easy' ? '简单' : d === 'Medium' ? '中等' : d === 'Hard' ? '困难' : <span className="flex items-center justify-center gap-1"><Skull size={10}/> 地狱</span>}
                             </button>
                         ))}
                     </div>
+                    {difficulty === 'Hell' && <p className="text-[10px] text-red-400 text-center">地狱模式：AI更有攻击性 (模拟外部引擎)</p>}
                 </div>
             )}
+
+            <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">音乐音量</label>
+                <div className="flex items-center gap-3 bg-gray-100 p-2 rounded-xl border-2 border-transparent hover:border-[#e3c086]/30 transition-colors">
+                    <button onClick={() => setMusicVolume(0)} className="text-gray-400 hover:text-gray-600">
+                        {musicVolume === 0 ? <VolumeX size={18}/> : <Volume2 size={18}/>}
+                    </button>
+                    <input 
+                        type="range" 
+                        min="0" 
+                        max="1" 
+                        step="0.01" 
+                        value={musicVolume} 
+                        onChange={(e) => setMusicVolume(parseFloat(e.target.value))}
+                        className="cute-range"
+                    />
+                </div>
+            </div>
+
+            <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">辅助功能</label>
+                <button 
+                    onClick={() => setShowWinRate(!showWinRate)}
+                    className={`w-full py-2 mb-2 rounded-xl font-bold text-sm border-2 flex items-center justify-center gap-2 ${showWinRate ? 'border-blue-300 bg-blue-50 text-blue-600' : 'border-transparent bg-gray-100 text-gray-400'}`}
+                >
+                    <BarChart3 size={16} /> {showWinRate ? '胜率条：开' : '胜率条：关'}
+                </button>
+                <button 
+                    onClick={() => setShowQi(!showQi)}
+                    className={`w-full py-2 rounded-xl font-bold text-sm border-2 flex items-center justify-center gap-2 ${showQi ? 'border-purple-300 bg-purple-50 text-purple-600' : 'border-transparent bg-gray-100 text-gray-400'}`}
+                >
+                    <Wind size={16} /> {showQi ? '气场特效：开' : '气场特效：关'}
+                </button>
+            </div>
 
             <div className="space-y-1">
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">棋盘大小</label>
@@ -433,16 +495,6 @@ const App: React.FC = () => {
                         </button>
                     ))}
                 </div>
-            </div>
-            
-            <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">特效</label>
-                <button 
-                    onClick={() => setShowQi(!showQi)}
-                    className={`w-full py-2 rounded-xl font-bold text-sm border-2 flex items-center justify-center gap-2 ${showQi ? 'border-purple-300 bg-purple-50 text-purple-600' : 'border-transparent bg-gray-100 text-gray-400'}`}
-                >
-                    <Wind size={16} /> {showQi ? '气场特效：开' : '气场特效：关'}
-                </button>
             </div>
 
             <button 
@@ -503,7 +555,7 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Game Over Modal */}
+      {/* Game Over Modal (Unchanged) */}
       {winner && (
          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in duration-300">
             <div className="bg-white p-8 rounded-3xl shadow-2xl flex flex-col items-center w-80 transform scale-110 border-4 border-[#e3c086]">
