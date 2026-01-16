@@ -62,6 +62,7 @@ const App: React.FC = () => {
   const [myColor, setMyColor] = useState<Player | null>(null);
   const [copied, setCopied] = useState(false);
   const peerRef = useRef<Peer | null>(null);
+  const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Audio Refs
   const bgmRef = useRef<HTMLAudioElement | null>(null);
@@ -153,12 +154,39 @@ const App: React.FC = () => {
   };
 
   // --- Online Logic ---
+  
+  // Timeout for connecting state
+  useEffect(() => {
+      if (onlineStatus === 'connecting') {
+          // Set a 15 second timeout to abort connection if it hangs
+          connectionTimeoutRef.current = setTimeout(() => {
+              if (onlineStatusRef.current === 'connecting') {
+                  setOnlineStatus('disconnected');
+                  setConnection(null);
+                  alert('连接超时！请检查双方网络环境，或重试。');
+                  // Close connection attempt if exists
+                  if (connection) {
+                      try { connection.close(); } catch(e) {}
+                  }
+              }
+          }, 15000);
+      } else {
+          if (connectionTimeoutRef.current) {
+              clearTimeout(connectionTimeoutRef.current);
+              connectionTimeoutRef.current = null;
+          }
+      }
+      return () => {
+          if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+      };
+  }, [onlineStatus]);
+
   useEffect(() => {
     if (showOnlineMenu && !peerRef.current) {
         // Generate a random 6-digit ID
         const id = Math.floor(100000 + Math.random() * 900000).toString();
         
-        // Configure Peer with explicit STUN servers to allow Cross-Network (WAN) connections
+        // Configure Peer with EXTENDED STUN servers list
         const peer = new Peer(id, {
             config: {
                 iceServers: [
@@ -167,6 +195,7 @@ const App: React.FC = () => {
                     { urls: 'stun:stun2.l.google.com:19302' },
                     { urls: 'stun:stun3.l.google.com:19302' },
                     { urls: 'stun:stun4.l.google.com:19302' },
+                    { urls: 'stun:global.stun.twilio.com:3478' } // Add Twilio public STUN
                 ]
             }
         });
@@ -176,12 +205,20 @@ const App: React.FC = () => {
         });
 
         peer.on('connection', (conn) => {
+            // Close any existing connection if a new one comes in? 
+            // For now, just accept the new one.
             handleConnection(conn, true);
         });
 
         peer.on('error', (err) => {
              console.error("PeerJS Error:", err);
-             // Common error: ID taken (unlikely with 6 digits) or network fail
+             // Suppress annoying errors once connected or if closed manually
+             if (err.type === 'peer-unavailable') {
+                 // Do nothing, handled by connection close/timeout usually
+             } else if (err.type === 'unavailable-id') {
+                 // Rare with 6 digits
+                 alert('ID冲突，请刷新重试');
+             }
         });
 
         peerRef.current = peer;
@@ -189,6 +226,7 @@ const App: React.FC = () => {
   }, [showOnlineMenu]);
 
   const handleConnection = (conn: DataConnection, isHost: boolean) => {
+      // Clean up old connection listener if any (logic handled by react state update mostly)
       setConnection(conn);
       setOnlineStatus('connecting');
 
@@ -200,13 +238,16 @@ const App: React.FC = () => {
           
           if (isHost) {
               setMyColor('black');
-              conn.send({ 
-                  type: 'SYNC', 
-                  boardSize, 
-                  gameType: gameTypeRef.current, 
-                  startColor: 'white' 
-              });
-              resetGame(true); 
+              // Give a tiny delay to ensure 'open' is processed on other side
+              setTimeout(() => {
+                conn.send({ 
+                    type: 'SYNC', 
+                    boardSize, 
+                    gameType: gameTypeRef.current, 
+                    startColor: 'white' 
+                });
+                resetGame(true); 
+              }, 500);
           }
       });
 
@@ -229,20 +270,22 @@ const App: React.FC = () => {
       conn.on('close', () => {
           setOnlineStatus('disconnected');
           setConnection(null);
-          alert('对方已断开连接');
+          // Only alert if we were actually connected or connecting
+          if (onlineStatusRef.current === 'connected') {
+             alert('对方已断开连接');
+          }
       });
       
       conn.on('error', (err) => {
           console.error("Connection Error:", err);
-          setOnlineStatus('disconnected');
-          setConnection(null);
-          alert('连接发生错误，请检查网络');
+          // Don't change status here, let 'close' or timeout handle it to avoid flickering
       });
   };
 
   const connectToPeer = () => {
       if (!peerRef.current || !remotePeerId) return;
-      const conn = peerRef.current.connect(remotePeerId);
+      // Force reliable mode
+      const conn = peerRef.current.connect(remotePeerId, { reliable: true });
       handleConnection(conn, false);
   };
 
