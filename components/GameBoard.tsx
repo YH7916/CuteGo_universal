@@ -32,7 +32,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   const boardSize = board.length;
   // Dynamic cell size
   const CELL_SIZE = boardSize === 9 ? 40 : boardSize === 13 ? 30 : 22;
-  const GRID_PADDING = boardSize === 19 ? 20 : 30;
+  // Reduced padding for larger boards to maximize 19x19 usage on small screens
+  const GRID_PADDING = boardSize === 19 ? 12 : 30;
   
   const STONE_RADIUS = CELL_SIZE * 0.45; // Slightly larger for better merging
   
@@ -337,12 +338,10 @@ export const GameBoard: React.FC<GameBoardProps> = ({
       )
   };
 
-  // 1. Renders the solid, merged body (Stones + Ortho Connections)
-  // New: Uses "jelly-black" or "jelly-white" filters for 3D Specular Highlight + Soft Shadow
   const renderSolidBody = (color: Player) => {
     const baseColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
     const filterId = color === 'black' ? 'url(#jelly-black)' : 'url(#jelly-white)';
-    const orthoWidth = CELL_SIZE * 0.95; // Thicker for better merging
+    const orthoWidth = CELL_SIZE * 0.95; 
 
     return (
         <g filter={filterId}>
@@ -372,13 +371,9 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     );
   };
 
-  // 2. Renders the loose silk connections 
-  // Improved: Groups all lines BEFORE opacity to avoid dark intersections
-  // Improved: "Breathe" animation is now strokewidth change before Goo filter, creating liquid flow
   const renderLooseSilk = (color: Player) => {
     const baseColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
     
-    // Group opacity is applied to the WHOLE liquid layer, solving intersection darkness
     return (
         <g opacity="0.65" filter="url(#goo-silk)">
            <g className="animate-liquid-flow">
@@ -400,7 +395,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
 
   return (
     <div 
-        className="relative flex justify-center items-center w-full max-w-[95vw] mx-auto aspect-square rounded-xl overflow-hidden border-4 border-[#cba367] bg-[#e3c086] touch-none shadow-xl"
+        className="relative flex justify-center items-center w-full h-full max-w-full aspect-square rounded-xl overflow-hidden border-4 border-[#cba367] bg-[#e3c086] touch-none shadow-xl"
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={() => {
@@ -420,10 +415,6 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             transform-origin: center;
         }
         @keyframes liquidFlow {
-            /* 
-               Varying stroke width fed into a Threshold filter creates a "peristaltic" pumping effect 
-               visually resembling liquid flowing through a tube.
-            */
             0%, 100% { stroke-width: ${CELL_SIZE * 0.12}px; }
             50% { stroke-width: ${CELL_SIZE * 0.22}px; }
         }
@@ -452,64 +443,43 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             style={{ maxWidth: '100%', maxHeight: '100%' }}
         >
             <defs>
-                {/* --- SHARED LIGHTING DEFINITIONS --- */}
-                
-                {/* 1. SILK GOO: High blur + High contrast = Liquid Blob */}
                 <filter id="goo-silk">
                     <feGaussianBlur in="SourceGraphic" stdDeviation={CELL_SIZE * 0.15} result="blur" />
                     <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 25 -10" result="goo" />
                     <feComposite in="SourceGraphic" in2="goo" operator="atop"/>
                 </filter>
 
-                {/* 2. JELLY BLACK: 3D look for Black stones */}
                 <filter id="jelly-black" x="-50%" y="-50%" width="200%" height="200%">
-                    {/* A. Create Blob Shape */}
                     <feGaussianBlur in="SourceGraphic" stdDeviation={CELL_SIZE * 0.1} result="blur" />
                     <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -9" result="blob" />
-                    
-                    {/* B. Specular Highlight (The "Wet" look) */}
                     <feGaussianBlur in="blob" stdDeviation="2" result="blurBlob"/>
                     <feSpecularLighting in="blurBlob" surfaceScale="5" specularConstant="0.8" specularExponent="20" lightingColor="#ffffff" result="specular">
                         <fePointLight x="-500" y="-500" z="300" />
                     </feSpecularLighting>
                     <feComposite in="specular" in2="blob" operator="in" result="specularInBlob"/>
-
-                    {/* C. Soft Drop Shadow (Instead of black border) */}
                     <feDropShadow dx="0" dy={CELL_SIZE * 0.1} stdDeviation={CELL_SIZE * 0.05} floodColor="#000000" floodOpacity="0.5" in="blob" result="shadow" />
-
-                    {/* D. Composition: Shadow -> Blob -> Highlight */}
                     <feComposite in="shadow" in2="blob" operator="over" result="shadowedBlob"/>
                     <feComposite in="specularInBlob" in2="shadowedBlob" operator="over" />
                 </filter>
 
-                {/* 3. JELLY WHITE: 3D look for White stones */}
                 <filter id="jelly-white" x="-50%" y="-50%" width="200%" height="200%">
-                    {/* A. Create Blob Shape */}
                     <feGaussianBlur in="SourceGraphic" stdDeviation={CELL_SIZE * 0.1} result="blur" />
                     <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -9" result="blob" />
-                    
-                    {/* B. Specular Highlight (The "Wet" look) */}
                     <feGaussianBlur in="blob" stdDeviation="2" result="blurBlob"/>
                     <feSpecularLighting in="blurBlob" surfaceScale="5" specularConstant="1.2" specularExponent="15" lightingColor="#ffffff" result="specular">
                         <fePointLight x="-500" y="-500" z="300" />
                     </feSpecularLighting>
                     <feComposite in="specular" in2="blob" operator="in" result="specularInBlob"/>
-
-                    {/* C. Soft Drop Shadow */}
                     <feDropShadow dx="0" dy={CELL_SIZE * 0.1} stdDeviation={CELL_SIZE * 0.05} floodColor="#5c4033" floodOpacity="0.3" in="blob" result="shadow" />
-
-                    {/* D. Composition */}
                     <feComposite in="shadow" in2="blob" operator="over" result="shadowedBlob"/>
                     <feComposite in="specularInBlob" in2="shadowedBlob" operator="over" />
                 </filter>
 
-                {/* QI BLUR */}
                 <filter id="qi-blur">
                     <feGaussianBlur in="SourceGraphic" stdDeviation={CELL_SIZE * 0.3} />
                 </filter>
             </defs>
             
-            {/* Layer 0: Qi (Aura) - Below Grid */}
             {renderQiLayer()}
 
             <g>{renderGridLines()}</g>
@@ -517,11 +487,9 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                 <circle key={`star-${i}`} cx={GRID_PADDING + x * CELL_SIZE} cy={GRID_PADDING + y * CELL_SIZE} r={boardSize > 13 ? 2 : 3} fill="#5c4033" />
             ))}
 
-            {/* Layer 1: Loose Silk (Liquid) */}
             {renderLooseSilk('black')}
             {renderLooseSilk('white')}
 
-            {/* Layer 2: Main Body (Jelly 3D) */}
             {renderSolidBody('black')}
             {renderSolidBody('white')}
 

@@ -68,12 +68,25 @@ export const getAllGroups = (board: BoardState): Group[] => {
   return groups;
 };
 
+// Simple board hash for Ko detection
+const hashBoard = (board: BoardState): string => {
+    let str = '';
+    for(let y=0; y<board.length; y++) {
+        for(let x=0; x<board.length; x++) {
+            const s = board[y][x];
+            str += s ? (s.color === 'black' ? 'B' : 'W') : '.';
+        }
+    }
+    return str;
+};
+
 export const attemptMove = (
   board: BoardState, 
   x: number, 
   y: number, 
   player: Player,
-  gameType: 'Go' | 'Gomoku' = 'Go'
+  gameType: 'Go' | 'Gomoku' = 'Go',
+  previousBoardStateHash: string | null = null
 ): { newBoard: BoardState; captured: number } | null => {
   if (board[y][x] !== null) return null;
 
@@ -105,6 +118,14 @@ export const attemptMove = (
   const myGroup = getGroup(nextBoard, { x, y });
   if (myGroup && myGroup.liberties === 0) {
     return null; // Suicide is illegal
+  }
+
+  // KO RULE CHECK
+  if (previousBoardStateHash) {
+      const currentHash = hashBoard(nextBoard);
+      if (currentHash === previousBoardStateHash) {
+          return null; // Illegal due to Ko (repeating position)
+      }
   }
 
   return { newBoard: nextBoard, captured: capturedCount };
@@ -141,7 +162,6 @@ export const checkGomokuWin = (board: BoardState, lastMove: {x: number, y: numbe
   return false;
 };
 
-// Simple territory calculation for scoring
 export const calculateScore = (board: BoardState): { black: number, white: number } => {
   const size = board.length;
   let blackScore = 0;
@@ -193,28 +213,21 @@ export const calculateScore = (board: BoardState): { black: number, white: numbe
 
 export const calculateWinRate = (board: BoardState): number => {
     const score = calculateScore(board);
-    const diff = score.black - score.white; // + means Black leads
-    // Use a sigmoid-like function to map point difference to win percentage (0-100)
-    // A difference of ~20 points is roughly 95% win rate
+    const diff = score.black - score.white; 
     const k = 0.15; 
     return (1 / (1 + Math.exp(-k * diff))) * 100;
 };
 
 // --- Advanced AI Logic ---
 
-// Helper: Check if a spot is a true eye for a color (Prevent AI from filling it)
 const isEye = (board: BoardState, x: number, y: number, color: Player): boolean => {
     const size = board.length;
     const neighbors = getNeighbors({x, y}, size);
-    // All ortho neighbors must be same color
     const orthoCheck = neighbors.every(n => board[n.y][n.x]?.color === color);
     if (!orthoCheck) return false;
-
-    // Diagonals check (simplified: if 3+ diagonals are enemy/empty for edge, it's not a real eye, but for AI heuristic simply protecting surrounded spots is enough)
     return true;
 }
 
-// Helper: Gomoku evaluation
 const evaluateGomokuLine = (board: BoardState, x: number, y: number, dx: number, dy: number, player: Player): number => {
   let count = 0;
   let openEnds = 0;
@@ -248,9 +261,7 @@ const evaluateGomokuLine = (board: BoardState, x: number, y: number, dx: number,
   return count * 10 + openEnds;
 };
 
-// "Third Party" AI Placeholder
-const getHellMove = (board: BoardState, player: Player): Point | null => {
-    // 1. Look for killing moves (Atari)
+const getHellMove = (board: BoardState, player: Player, previousBoardHash: string | null): Point | null => {
     const size = board.length;
     const validMoves: Point[] = [];
     for (let y = 0; y < size; y++) {
@@ -265,47 +276,40 @@ const getHellMove = (board: BoardState, player: Player): Point | null => {
     const opponent = player === 'black' ? 'white' : 'black';
 
     for (const move of validMoves) {
-        if (isEye(board, move.x, move.y, player)) continue; // Don't fill eyes
+        if (isEye(board, move.x, move.y, player)) continue;
 
-        const result = attemptMove(board, move.x, move.y, player, 'Go');
-        if (!result) continue; // Suicide check failed
+        // Pass Ko hash check here
+        const result = attemptMove(board, move.x, move.y, player, 'Go', previousBoardHash);
+        if (!result) continue; 
 
-        let weight = Math.random(); // Base random
+        let weight = Math.random(); 
 
-        // A. Capture Weight
         if (result.captured > 0) {
             weight += result.captured * 50; 
         }
 
-        // B. Save Self Weight (Check if we are in Atari)
         const myGroup = getGroup(result.newBoard, move);
         if (myGroup && myGroup.liberties === 1) {
-            // Bad move, puts self in atari immediately
             weight -= 50; 
         } else if (myGroup && myGroup.liberties > 2) {
-            // Good shape
             weight += 5;
         }
 
-        // C. Cut Opponent
         const neighbors = getNeighbors(move, size);
         let opponentGroups = 0;
         neighbors.forEach(n => {
             if (board[n.y][n.x]?.color === opponent) opponentGroups++;
         });
-        if (opponentGroups >= 2) weight += 15; // Cutting move
+        if (opponentGroups >= 2) weight += 15;
 
-        // D. Edge/Corner preference (Golden lines)
         if (size > 9) {
             const dX = Math.min(move.x, size - 1 - move.x);
             const dY = Math.min(move.y, size - 1 - move.y);
             if ((dX === 2 || dX === 3) && (dY === 2 || dY === 3)) weight += 8;
         }
 
-        // E. Prevent "Useless" moves inside own established territory
-        // If all neighbors are friendly or empty-but-surrounded-by-friendly, lower weight
         const friendlyNeighbors = neighbors.filter(n => board[n.y][n.x]?.color === player).length;
-        if (friendlyNeighbors === neighbors.length) weight -= 20; // Filling own space
+        if (friendlyNeighbors === neighbors.length) weight -= 20;
 
         if (weight > maxWeight) {
             maxWeight = weight;
@@ -313,9 +317,7 @@ const getHellMove = (board: BoardState, player: Player): Point | null => {
         }
     }
 
-    // If the best move is negative value (mostly filling own space), pass
     if (maxWeight < -10) return null;
-
     return bestMove;
 };
 
@@ -324,7 +326,8 @@ export const getAIMove = (
   board: BoardState, 
   player: Player, 
   gameType: 'Go' | 'Gomoku',
-  difficulty: Difficulty
+  difficulty: Difficulty,
+  previousBoardHash: string | null
 ): Point | null => {
   const size = board.length;
   const validMoves: Point[] = [];
@@ -335,7 +338,6 @@ export const getAIMove = (
   }
   if (validMoves.length === 0) return null;
 
-  // --- GOMOKU AI ---
   if (gameType === 'Gomoku') {
     if (difficulty === 'Easy') return validMoves[Math.floor(Math.random() * validMoves.length)];
 
@@ -346,18 +348,11 @@ export const getAIMove = (
     for (const move of validMoves) {
       let score = 0;
       const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
-
-      // 1. Attack
-      for (const [dx, dy] of directions) {
-        score += evaluateGomokuLine(board, move.x, move.y, dx, dy, player);
-      }
-
-      // 2. Defense
+      for (const [dx, dy] of directions) score += evaluateGomokuLine(board, move.x, move.y, dx, dy, player);
+      
       const defenseMultiplier = difficulty === 'Hard' || difficulty === 'Hell' ? 1.5 : 0.8; 
       let threatScore = 0;
-      for (const [dx, dy] of directions) {
-         threatScore += evaluateGomokuLine(board, move.x, move.y, dx, dy, opponent);
-      }
+      for (const [dx, dy] of directions) threatScore += evaluateGomokuLine(board, move.x, move.y, dx, dy, opponent);
       
       if (threatScore >= 5000) score += 20000; 
       else score += threatScore * defenseMultiplier;
@@ -376,57 +371,44 @@ export const getAIMove = (
 
   // --- GO AI ---
 
-  // HELL Mode: Simulating a stronger engine
   if (difficulty === 'Hell') {
-      return getHellMove(board, player);
+      return getHellMove(board, player, previousBoardHash);
   }
 
-  // Easy: Random but checks suicide
   if (difficulty === 'Easy') {
-    const safeMoves = validMoves.filter(m => attemptMove(board, m.x, m.y, player, 'Go') !== null);
-    // Even easy AI shouldn't fill eyes if possible
+    const safeMoves = validMoves.filter(m => attemptMove(board, m.x, m.y, player, 'Go', previousBoardHash) !== null);
     const betterMoves = safeMoves.filter(m => !isEye(board, m.x, m.y, player));
     
     if (betterMoves.length > 0) return betterMoves[Math.floor(Math.random() * betterMoves.length)];
     return safeMoves.length > 0 ? safeMoves[Math.floor(Math.random() * safeMoves.length)] : null;
   }
 
-  // Medium/Hard Logic
-  
+  // Medium/Hard
   let candidates = validMoves.filter(m => {
-      const isSuicide = attemptMove(board, m.x, m.y, player, 'Go') === null;
+      const isSuicide = attemptMove(board, m.x, m.y, player, 'Go', previousBoardHash) === null;
       const fillsEye = isEye(board, m.x, m.y, player);
       return !isSuicide && !fillsEye;
   });
   
   if (candidates.length === 0) return null;
 
-  // PRODUCTIVE MOVE CHECK
-  // Filter out moves that are just filling own territory (basic check: all neighbors are friendly).
   const productiveMoves = candidates.filter(m => {
       const neighbors = getNeighbors(m, size);
       const friendlyCount = neighbors.filter(n => board[n.y][n.x]?.color === player).length;
-      return friendlyCount < neighbors.length; // At least one empty or enemy neighbor
+      return friendlyCount < neighbors.length; 
   });
 
-  // LOGIC FIX: In Medium/Hard mode, if no productive moves exist (only Dame filling remains), 
-  // do NOT pass immediately. Fallback to playing ANY valid move (Dame) to ensure the game finishes properly.
-  // In Easy, we can be lazy and pass.
   let pool = productiveMoves;
   if (pool.length === 0) {
-      // Since Easy/Hell return early, we are in Medium/Hard here.
-      pool = candidates; // Play Dame/Neutral points
+      pool = candidates; 
   }
 
-  // If even candidates are empty (should be caught above, but safety check)
   if (pool.length === 0) return null;
 
-  // 1. Check for Ataris (Save own or Capture enemy)
   for(const move of pool) {
-     const sim = attemptMove(board, move.x, move.y, player, 'Go');
+     const sim = attemptMove(board, move.x, move.y, player, 'Go', previousBoardHash);
      if(sim && sim.captured > 0) return move;
      
-     // Check saving self (simplistic: play near low liberty friendly stones)
      const neighbors = getNeighbors(move, size);
      for(const n of neighbors) {
          const s = board[n.y][n.x];
@@ -439,7 +421,6 @@ export const getAIMove = (
      }
   }
 
-  // 2. Hard Mode Strategy: Edges and Corners
   if (difficulty === 'Hard') {
       const preferred = pool.filter(m => {
           const dX = Math.min(m.x, size - 1 - m.x);
@@ -451,7 +432,6 @@ export const getAIMove = (
       }
   }
 
-  // Fallback: Contact moves
   const contactMoves = pool.filter(m => {
       const n = getNeighbors(m, size);
       return n.some(p => board[p.y][p.x] !== null);

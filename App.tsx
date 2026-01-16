@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameBoard } from './components/GameBoard';
 import { BoardState, Player, GameMode, GameType, BoardSize, Difficulty } from './types';
 import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore, calculateWinRate } from './utils/goLogic';
-import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull } from 'lucide-react';
+import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull, Undo2 } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
 
 // Types for P2P Messages
@@ -11,6 +11,16 @@ type PeerMessage =
   | { type: 'PASS' }
   | { type: 'SYNC'; boardSize: BoardSize; gameType: GameType; startColor: Player }
   | { type: 'RESTART' };
+
+// Undo History Item
+interface HistoryItem {
+    board: BoardState;
+    currentPlayer: Player;
+    blackCaptures: number;
+    whiteCaptures: number;
+    lastMove: { x: number, y: number } | null;
+    consecutivePasses: number;
+}
 
 const App: React.FC = () => {
   // Settings
@@ -34,9 +44,13 @@ const App: React.FC = () => {
   const [consecutivePasses, setConsecutivePasses] = useState(0);
   const [finalScore, setFinalScore] = useState<{black: number, white: number} | null>(null);
   
+  // Undo Stack
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  
   // UI State
   const [showMenu, setShowMenu] = useState(false);
   const [showPassModal, setShowPassModal] = useState(false);
+  const [isThinking, setIsThinking] = useState(false); // Block undo during AI turn
 
   // Online State
   const [showOnlineMenu, setShowOnlineMenu] = useState(false);
@@ -66,7 +80,6 @@ const App: React.FC = () => {
   useEffect(() => { onlineStatusRef.current = onlineStatus; }, [onlineStatus]);
 
   // Handle BGM Playback Logic
-  // Browsers block autoplay until interaction. This listener attempts to play audio on first click.
   useEffect(() => {
     const startAudio = () => {
         if (!hasInteracted) {
@@ -84,7 +97,6 @@ const App: React.FC = () => {
   useEffect(() => {
     if (bgmRef.current) {
         bgmRef.current.volume = musicVolume;
-        // If we have already interacted (or if this is a user-initiated change), try playing
         if (musicVolume > 0 && bgmRef.current.paused && hasInteracted) {
              bgmRef.current.play().catch(e => console.log("Play blocked", e));
         } else if (musicVolume === 0) {
@@ -96,6 +108,13 @@ const App: React.FC = () => {
   useEffect(() => {
     resetGame();
   }, [boardSize, gameType]);
+
+  // --- Helper: Board Stringify for Ko ---
+  const getBoardHash = (b: BoardState) => {
+      let str = '';
+      for(let r=0; r<b.length; r++) for(let c=0; c<b.length; c++) str += b[r][c] ? (b[r][c]?.color==='black'?'B':'W') : '.';
+      return str;
+  };
 
   // --- Online Logic ---
   useEffect(() => {
@@ -174,15 +193,96 @@ const App: React.FC = () => {
   
   // --- Game Logic ---
 
+  // Undo Function
+  const handleUndo = () => {
+      if (history.length === 0 || isThinking || gameOver || onlineStatus === 'connected') return;
+
+      // In PvAI, undo 2 steps if it's player's turn (to undo AI's move + Player's move)
+      // Unless history has only 1 step (AI started? Rare case in current logic as Black always starts)
+      let stepsToUndo = 1;
+      if (gameMode === 'PvAI' && currentPlayer === 'black' && history.length >= 2) {
+          stepsToUndo = 2;
+      }
+
+      const prev = history[history.length - stepsToUndo];
+      setBoard(prev.board);
+      setCurrentPlayer(prev.currentPlayer);
+      setBlackCaptures(prev.blackCaptures);
+      setWhiteCaptures(prev.whiteCaptures);
+      setLastMove(prev.lastMove);
+      setConsecutivePasses(prev.consecutivePasses);
+      
+      setHistory(prevHistory => prevHistory.slice(0, prevHistory.length - stepsToUndo));
+  };
+
+  const saveHistory = () => {
+      setHistory(prev => [...prev, {
+          board: boardRef.current,
+          currentPlayer: currentPlayerRef.current,
+          blackCaptures,
+          whiteCaptures,
+          lastMove,
+          consecutivePasses
+      }]);
+  };
+
   // Unified Move Execution Logic (Local & Remote)
   const executeMove = useCallback((x: number, y: number, isRemote: boolean) => {
       const currentBoard = boardRef.current;
       const activePlayer = currentPlayerRef.current;
       const currentType = gameTypeRef.current;
 
-      const result = attemptMove(currentBoard, x, y, activePlayer, currentType);
+      // Ko Check: Get previous board hash from history
+      let prevHash = null;
+      if (history.length > 0) {
+          // The board before current player made a move is at history index [length-1]? 
+          // No, history saves state BEFORE a move. 
+          // So history[length-1].board is the state before activePlayer moved? 
+          // Actually, we need to compare against the board state *before the opponent moved* for Ko.
+          // But 'attemptMove' just checks if the *resulting* board is same as *immediate previous*. 
+          // Wait, Ko rule: You cannot play a move that recreates the board state of the PREVIOUS turn.
+          // So if history contains [State A, State B], and we are at State C.
+          // If Move(State C) -> State B, that is Ko.
+          // App uses simple state: 'board' is current.
+          // So we check against `board`. No.
+          // We need to pass the board from *one turn ago*.
+          // If history is [T0, T1], and current is T2.
+          // If T2 + Move == T1, it is Ko.
+          // So we pass history[history.length - 1]?.board (which is state before T2) to check?
+          // No, simple Ko: You capture, opponent cannot immediately recapture.
+          // Board state cannot repeat.
+          // So newBoard !== previousBoard.
+          // The `board` variable IS the previous board relative to the *new* move.
+          // So if attemptMove returns newBoard === board, that's impossible anyway.
+          // Ko is: newBoard === history[history.length - 1].board.
+          if (history.length > 0) {
+             prevHash = getBoardHash(history[history.length - 1].board);
+          }
+      }
+
+      // We only save history right before mutating state in `executeMove`? 
+      // No, `executeMove` is called. We should save history *before* applying changes.
+      // But inside this callback `history` might be stale.
+      // Refactoring: `saveHistory` needs to happen before state update.
+      // However, React state updates are batched. 
+      // Let's use functional update for history in the setBoard block or separate effect?
+      // Better: executeMove creates the new state, then we update everything.
+
+      const result = attemptMove(currentBoard, x, y, activePlayer, currentType, prevHash);
       
       if (result) {
+          // Save History (Local only)
+          if (!isRemote) {
+             setHistory(prev => [...prev, {
+                 board: currentBoard,
+                 currentPlayer: activePlayer,
+                 blackCaptures,
+                 whiteCaptures,
+                 lastMove,
+                 consecutivePasses
+             }]);
+          }
+
           // Update Board
           setBoard(result.newBoard);
           setLastMove({ x, y });
@@ -206,10 +306,10 @@ const App: React.FC = () => {
           // Switch Player
           setCurrentPlayer(prev => prev === 'black' ? 'white' : 'black');
       }
-  }, []);
+  }, [blackCaptures, whiteCaptures, lastMove, consecutivePasses, history]); // added history dep
 
   const handleIntersectionClick = useCallback((x: number, y: number) => {
-    if (gameOver || showPassModal) return;
+    if (gameOver || showPassModal || isThinking) return;
     if (gameMode === 'PvAI' && currentPlayer === 'white') return;
     
     // Online Check
@@ -221,11 +321,23 @@ const App: React.FC = () => {
     // Execute Move locally
     executeMove(x, y, false);
 
-  }, [gameOver, showPassModal, gameMode, currentPlayer, onlineStatus, myColor, connection, executeMove]);
+  }, [gameOver, showPassModal, gameMode, currentPlayer, onlineStatus, myColor, connection, executeMove, isThinking]);
 
   const handlePass = useCallback((isRemote: boolean = false) => {
     if (gameOver) return;
     
+    // Save history before pass
+    if (!isRemote) {
+        setHistory(prev => [...prev, {
+            board: boardRef.current,
+            currentPlayer: currentPlayerRef.current,
+            blackCaptures,
+            whiteCaptures,
+            lastMove,
+            consecutivePasses
+        }]);
+    }
+
     // Online sync
     if (onlineStatusRef.current === 'connected' && !isRemote) {
         if (currentPlayerRef.current !== myColorRef.current) return;
@@ -254,6 +366,7 @@ const App: React.FC = () => {
     });
 
     if (activePlayer === 'white' && gameMode === 'PvAI') {
+        // AI Pass handling visual
         setShowPassModal(true);
     } else if (isRemote) {
         setShowPassModal(true);
@@ -264,7 +377,7 @@ const App: React.FC = () => {
          setLastMove(null);
     }
 
-  }, [gameOver, gameMode, connection, consecutivePasses]); 
+  }, [gameOver, gameMode, connection, consecutivePasses, blackCaptures, whiteCaptures, lastMove]); 
 
   const endGame = (winner: Player, reason: string) => {
     setGameOver(true);
@@ -275,22 +388,26 @@ const App: React.FC = () => {
   // AI Turn Handling
   useEffect(() => {
     if (gameMode === 'PvAI' && currentPlayer === 'white' && !gameOver && !showPassModal) {
+      setIsThinking(true);
       const timer = setTimeout(() => {
-        // NOTE: In a real implementation, you would check difficulty here.
-        // If 'Hell' and using an external API, await fetch(...)
-        // Since we are using local simulation:
-        const move = getAIMove(board, 'white', gameType, difficulty);
+        // AI Logic
+        // Calculate Ko Hash from history (AI needs to avoid this)
+        let prevHash = null;
+        if (history.length > 0) prevHash = getBoardHash(history[history.length-1].board);
+
+        const move = getAIMove(board, 'white', gameType, difficulty, prevHash);
         
         if (move) {
            executeMove(move.x, move.y, false);
         } else {
-           // AI passes if no useful moves found (avoids endless game)
+           // AI passes
            handlePass();
         }
+        setIsThinking(false);
       }, 700);
       return () => clearTimeout(timer);
     }
-  }, [currentPlayer, gameMode, board, gameOver, gameType, difficulty, showPassModal, handlePass, executeMove]);
+  }, [currentPlayer, gameMode, board, gameOver, gameType, difficulty, showPassModal, handlePass, executeMove, history]);
 
   const resetGame = (keepOnline: boolean = false) => {
     setBoard(createBoard(boardSize));
@@ -303,8 +420,10 @@ const App: React.FC = () => {
     setWinReason('');
     setConsecutivePasses(0);
     setFinalScore(null);
+    setHistory([]);
     setShowMenu(false);
     setShowPassModal(false);
+    setIsThinking(false);
     
     if (onlineStatusRef.current === 'connected' && !keepOnline) {
         connection?.send({ type: 'RESTART' });
@@ -318,109 +437,144 @@ const App: React.FC = () => {
   const winRate = showWinRate && !gameOver ? calculateWinRate(board) : 50;
 
   return (
-    <div className="h-full w-full bg-[#f7e7ce] flex flex-col items-center relative select-none overflow-hidden">
+    <div className="h-full w-full bg-[#f7e7ce] flex flex-col md:flex-row items-center relative select-none overflow-hidden">
       
-      {/* Background Audio - Switched to a more robust, cute track */}
+      {/* Background Audio */}
       <audio 
         ref={bgmRef} 
         loop 
-        src="https://cdn.pixabay.com/download/audio/2022/10/25/audio_2494548483.mp3?filename=playful-cat-123495.mp3" 
+        src="/public/bgm.mp3" 
       />
 
-      {/* Header */}
-      <div className="w-full max-w-md px-4 py-2 flex justify-between items-center z-20 shrink-0">
-        <div className="flex flex-col">
-            <span className="font-bold text-gray-700 text-lg leading-tight flex items-center gap-2">
-               {gameType === 'Go' ? '围棋' : '五子棋'}
-               <span className="text-xs font-normal text-gray-500 bg-white/50 px-2 py-0.5 rounded-full border border-gray-200">
-                 {boardSize}路 • {difficulty === 'Hell' ? '地狱AI' : (onlineStatus === 'connected' ? '在线' : (gameMode === 'PvAI' ? '人机' : '本地'))}
-               </span>
-               {onlineStatus === 'connected' && (
-                    <span className="relative flex h-2 w-2">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                    </span>
-               )}
-            </span>
+      {/* --- TABLET/DESKTOP LAYOUT: Left Side Board --- */}
+      <div className="relative flex-grow h-[60%] md:h-full w-full flex items-center justify-center p-2 order-2 md:order-1 min-h-0">
+          <div className="w-full h-full max-w-full max-h-full aspect-square flex items-center justify-center">
+             <div className="transform transition-transform w-full h-full">
+                <GameBoard 
+                    board={board} 
+                    onIntersectionClick={handleIntersectionClick}
+                    currentPlayer={currentPlayer}
+                    lastMove={lastMove}
+                    showQi={showQi}
+                />
+             </div>
+          </div>
+          
+          {/* AI Thinking Indicator */}
+          {isThinking && (
+              <div className="absolute top-4 left-4 bg-white/80 px-3 py-1 rounded-full text-xs font-bold text-gray-500 animate-pulse border border-gray-200 shadow-sm z-20">
+                  AI 思考中...
+              </div>
+          )}
+
+           {/* Pass Indicator overlay */}
+          {consecutivePasses === 1 && !gameOver && (
+              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/60 text-white px-6 py-3 rounded-2xl backdrop-blur-md animate-bounce z-30 font-bold pointer-events-none">
+                  {lastMove === null ? '对手停着' : '停着'} - 再停一次结束
+              </div>
+          )}
+      </div>
+
+      {/* --- TABLET/DESKTOP LAYOUT: Right Side Sidebar --- */}
+      <div className="w-full md:w-80 lg:w-96 flex flex-col gap-4 p-4 z-20 shrink-0 bg-[#f7e7ce] md:bg-[#f0dfc5] md:h-full md:border-l md:border-[#e3c086] order-1 md:order-2 shadow-xl md:shadow-none">
+        
+        {/* Header Section */}
+        <div className="flex justify-between items-center">
+            <div className="flex flex-col">
+                <span className="font-bold text-gray-700 text-lg leading-tight flex items-center gap-2">
+                {gameType === 'Go' ? '围棋' : '五子棋'}
+                <span className="text-xs font-normal text-gray-500 bg-white/50 px-2 py-0.5 rounded-full border border-gray-200">
+                    {boardSize}路 • {difficulty === 'Hell' ? '地狱' : (onlineStatus === 'connected' ? '在线' : (gameMode === 'PvAI' ? '人机' : '本地'))}
+                </span>
+                {onlineStatus === 'connected' && (
+                        <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                        </span>
+                )}
+                </span>
+            </div>
+            
+            <button 
+            onClick={() => setShowMenu(true)}
+            className="bg-[#cba367] hover:bg-[#b89258] text-white p-2 rounded-xl shadow-sm font-bold transition-all active:scale-95"
+            >
+            <Settings size={20} />
+            </button>
+        </div>
+
+        {/* Score Card */}
+        <div className="flex flex-col gap-2">
+            <div className="grid grid-cols-2 gap-2">
+                {/* Black */}
+                <div className={`flex items-center gap-2 px-3 py-3 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'black' ? 'bg-black/10 border-black/20 shadow-sm scale-105' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'black' ? 'ring-2 ring-blue-400' : ''}`}>
+                    <div className="w-8 h-8 rounded-full bg-[#2a2a2a] shadow-inner border-2 border-[#444] shrink-0 relative">
+                        {currentPlayer === 'black' && isThinking && <div className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-400 rounded-full animate-ping"></div>}
+                    </div>
+                    <div className="flex flex-col">
+                        <span className="font-bold text-gray-800 text-sm">黑子 {onlineStatus === 'connected' && myColor === 'black' && '(我)'}</span>
+                        {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {blackCaptures}</span>}
+                    </div>
+                </div>
+
+                {/* White */}
+                <div className={`flex items-center justify-end gap-2 px-3 py-3 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'white' ? 'bg-white/60 border-white/50 shadow-sm scale-105' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'white' ? 'ring-2 ring-blue-400' : ''}`}>
+                    <div className="flex flex-col items-end">
+                        <span className="font-bold text-gray-800 text-sm">白子 {onlineStatus === 'connected' && myColor === 'white' && '(我)'}</span>
+                        {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {whiteCaptures}</span>}
+                    </div>
+                    <div className="w-8 h-8 rounded-full bg-[#f0f0f0] shadow-inner border-2 border-white shrink-0 relative">
+                        {currentPlayer === 'white' && isThinking && <div className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-400 rounded-full animate-ping"></div>}
+                    </div>
+                </div>
+            </div>
+
+            {/* Win Rate Bar */}
+            {showWinRate && gameType === 'Go' && (
+                <div className="w-full h-2 bg-white/50 rounded-full overflow-hidden flex shadow-inner mt-1">
+                    <div 
+                        className="h-full bg-gray-800 transition-all duration-1000 ease-in-out" 
+                        style={{ width: `${winRate}%` }}
+                    />
+                    <div 
+                        className="h-full bg-white transition-all duration-1000 ease-in-out" 
+                        style={{ width: `${100 - winRate}%` }}
+                    />
+                </div>
+            )}
+        </div>
+
+        {/* Action Buttons */}
+        <div className="grid grid-cols-3 gap-2 mt-auto">
+            <button 
+            onClick={handleUndo}
+            disabled={history.length === 0 || isThinking || gameOver || onlineStatus === 'connected'}
+            className="flex flex-col items-center justify-center gap-1 bg-[#e0d0b0] text-[#8c6b38] p-3 rounded-xl shadow-sm font-bold hover:bg-[#d6c29c] active:scale-95 transition-all border-b-4 border-[#c4ae88] disabled:opacity-50 disabled:active:scale-100 disabled:border-transparent"
+            >
+            <Undo2 size={20} /> <span className="text-xs">悔棋</span>
+            </button>
+
+            <button 
+            onClick={() => handlePass(false)}
+            disabled={gameOver || showPassModal || (onlineStatus === 'connected' && currentPlayer !== myColor)}
+            className="flex flex-col items-center justify-center gap-1 bg-[#8c6b38] text-white p-3 rounded-xl shadow-sm font-bold hover:bg-[#7a5c30] active:scale-95 transition-all border-b-4 border-[#5c4033] disabled:opacity-50 disabled:active:scale-100"
+            >
+            <SkipForward size={20} /> <span className="text-xs">停着</span>
+            </button>
+            
+            <button 
+            onClick={() => resetGame(false)}
+            className="flex flex-col items-center justify-center gap-1 bg-white text-gray-700 p-3 rounded-xl shadow-sm font-bold hover:bg-gray-50 active:scale-95 transition-all border-b-4 border-gray-200"
+            >
+            <RotateCcw size={20} /> <span className="text-xs">重开</span>
+            </button>
         </div>
         
-        <button 
-          onClick={() => setShowMenu(true)}
-          className="bg-[#cba367] hover:bg-[#b89258] text-white p-2 rounded-xl shadow-sm font-bold transition-all active:scale-95"
-        >
-          <Settings size={20} />
-        </button>
+        {/* Tablet specific spacer */}
+        <div className="hidden md:block flex-grow"></div>
       </div>
 
-      {/* Score */}
-      <div className="w-full max-w-md px-4 mb-1 z-20 flex flex-col gap-1 shrink-0">
-        <div className="grid grid-cols-2 gap-2">
-            {/* Black */}
-            <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'black' ? 'bg-black/10 border-black/20 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'black' ? 'ring-2 ring-blue-400' : ''}`}>
-                <div className="w-6 h-6 rounded-full bg-[#2a2a2a] shadow-inner border-2 border-[#444] shrink-0"></div>
-                <div className="flex flex-col">
-                    <span className="font-bold text-gray-800 text-sm">黑子 {onlineStatus === 'connected' && myColor === 'black' && '(我)'}</span>
-                    {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {blackCaptures}</span>}
-                </div>
-            </div>
-
-            {/* White */}
-            <div className={`flex items-center justify-end gap-2 px-3 py-2 rounded-xl border-2 transition-all duration-300 ${currentPlayer === 'white' ? 'bg-white/60 border-white/50 shadow-sm' : 'border-transparent opacity-60'} ${onlineStatus === 'connected' && myColor === 'white' ? 'ring-2 ring-blue-400' : ''}`}>
-                <div className="flex flex-col items-end">
-                    <span className="font-bold text-gray-800 text-sm">白子 {onlineStatus === 'connected' && myColor === 'white' && '(我)'}</span>
-                    {gameType === 'Go' && <span className="text-xs text-gray-700 font-bold">提子: {whiteCaptures}</span>}
-                </div>
-                <div className="w-6 h-6 rounded-full bg-[#f0f0f0] shadow-inner border-2 border-white shrink-0"></div>
-            </div>
-        </div>
-
-        {/* Win Rate Bar */}
-        {showWinRate && gameType === 'Go' && (
-            <div className="w-full h-1.5 bg-white/50 rounded-full overflow-hidden flex shadow-inner">
-                <div 
-                    className="h-full bg-gray-800 transition-all duration-1000 ease-in-out" 
-                    style={{ width: `${winRate}%` }}
-                />
-                <div 
-                    className="h-full bg-white transition-all duration-1000 ease-in-out" 
-                    style={{ width: `${100 - winRate}%` }}
-                />
-            </div>
-        )}
-      </div>
-
-      {/* Board */}
-      <div className="relative z-10 flex-grow flex items-center justify-center w-full overflow-hidden min-h-0">
-        <div className="transform transition-transform">
-            <GameBoard 
-            board={board} 
-            onIntersectionClick={handleIntersectionClick}
-            currentPlayer={currentPlayer}
-            lastMove={lastMove}
-            showQi={showQi}
-            />
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div className="w-full max-w-md px-6 py-4 flex justify-center gap-3 z-20 shrink-0">
-         <button 
-           onClick={() => handlePass(false)}
-           disabled={gameOver || showPassModal || (onlineStatus === 'connected' && currentPlayer !== myColor)}
-           className="flex items-center gap-2 bg-[#8c6b38] text-white px-6 py-2.5 rounded-xl shadow-md font-bold hover:bg-[#7a5c30] active:scale-95 transition-all border-b-4 border-[#5c4033] disabled:opacity-50 disabled:active:scale-100"
-         >
-           <SkipForward size={18} /> 停着
-         </button>
-         
-         <button 
-           onClick={() => resetGame(false)}
-           className="flex items-center gap-2 bg-white text-gray-700 px-6 py-2.5 rounded-xl shadow-md font-bold hover:bg-gray-50 active:scale-95 transition-all border-b-4 border-gray-200"
-         >
-           <RotateCcw size={18} /> 重开
-         </button>
-      </div>
-
-      {/* Settings Modal */}
+      {/* Settings Modal (Unchanged content, kept for context) */}
       {showMenu && (
         <div className="absolute inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border-4 border-[#e3c086] flex flex-col gap-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
