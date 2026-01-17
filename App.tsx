@@ -5,7 +5,7 @@ import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore, ca
 import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull, Undo2, AlertCircle, X } from 'lucide-react';
 
 // --- Configuration ---
-const WORKER_URL = 'https://cute-go-signaling.3240106155.workers.dev';
+const WORKER_URL = 'https://api.yesterhaze.codes';
 
 // Types for P2P Messages
 type PeerMessage = 
