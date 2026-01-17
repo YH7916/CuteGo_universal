@@ -4,17 +4,25 @@ import { BoardState, Player, GameMode, GameType, BoardSize, Difficulty } from '.
 import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore, calculateWinRate, serializeGame, deserializeGame } from './utils/goLogic';
 import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull, Undo2, AlertCircle, X, Eye, FileUp, Hash, Eraser, PenTool, LayoutGrid, Zap } from 'lucide-react';
 
-// --- Configuration ---
+// --- 1. 引入 Supabase ---
+import { createClient } from '@supabase/supabase-js';
+
+// --- 2. 配置 Supabase (使用你提供的信息) ---
+const SUPABASE_URL = 'https://ibtgczhypjybiibtapcn.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_JapcRCoxrlIwk8_EKPrDoQ_QKZ_J7WU'; 
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// --- 3. 定义信令消息类型 ---
+type SignalMessage = 
+  | { type: 'join' } 
+  | { type: 'offer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'answer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'ice'; candidate: RTCIceCandidateInit };
+
+// 原有的 Worker URL 可以保留用于获取额外 TURN (可选)，或者直接删掉
 const WORKER_URL = 'https://api.yesterhaze.codes';
 
-// Types for P2P Messages
-type PeerMessage = 
-  | { type: 'MOVE'; x: number; y: number }
-  | { type: 'PASS' }
-  | { type: 'SYNC'; boardSize: BoardSize; gameType: GameType; startColor: Player }
-  | { type: 'RESTART' };
-
-// Undo History Item
+// ... (这里保留你的 HistoryItem, PeerMessage 类型定义，AppMode 等，不用变) ...
 interface HistoryItem {
     board: BoardState;
     currentPlayer: Player;
@@ -23,23 +31,24 @@ interface HistoryItem {
     lastMove: { x: number, y: number } | null;
     consecutivePasses: number;
 }
-
 type AppMode = 'playing' | 'review' | 'setup';
 
 const App: React.FC = () => {
+  // ... (保留原本的 state: boardSize, gameType 等等，直到 "Online State") ...
+  
   // --- Global App State ---
   const [boardSize, setBoardSize] = useState<BoardSize>(9);
   const [gameType, setGameType] = useState<GameType>('Go');
   const [gameMode, setGameMode] = useState<GameMode>('PvP');
   const [difficulty, setDifficulty] = useState<Difficulty>('Medium');
   
-  // Visual/Audio Settings (Apply Immediately)
+  // Visual/Audio Settings
   const [showQi, setShowQi] = useState<boolean>(false);
   const [showWinRate, setShowWinRate] = useState<boolean>(true);
   const [showCoordinates, setShowCoordinates] = useState<boolean>(false);
   const [musicVolume, setMusicVolume] = useState<number>(0.3);
 
-  // Settings Modal Local State (Pending Changes)
+  // Settings Modal Local State
   const [tempBoardSize, setTempBoardSize] = useState<BoardSize>(9);
   const [tempGameType, setTempGameType] = useState<GameType>('Go');
   const [tempGameMode, setTempGameMode] = useState<GameMode>('PvP');
@@ -75,7 +84,7 @@ const App: React.FC = () => {
   const [showPassModal, setShowPassModal] = useState(false); 
   const [isThinking, setIsThinking] = useState(false); 
 
-  // Online State
+  // --- Online State (移除了 pollingRef) ---
   const [showOnlineMenu, setShowOnlineMenu] = useState(false);
   const [peerId, setPeerId] = useState<string>('');
   const [remotePeerId, setRemotePeerId] = useState<string>('');
@@ -87,9 +96,9 @@ const App: React.FC = () => {
   // WebRTC Refs
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
-  const pollingRef = useRef<number | null>(null);
-  
-  // Audio Refs
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null); // 新增：用于清理 Supabase 频道
+
+  // Audio Refs ... (保留原样)
   const bgmRef = useRef<HTMLAudioElement | null>(null);
   const sfxMove = useRef<HTMLAudioElement | null>(null);
   const sfxCapture = useRef<HTMLAudioElement | null>(null);
@@ -99,7 +108,7 @@ const App: React.FC = () => {
 
   const [hasInteracted, setHasInteracted] = useState(false);
 
-  // Refs for State
+  // Refs for State ... (保留原样)
   const boardRef = useRef(board);
   const currentPlayerRef = useRef(currentPlayer);
   const gameTypeRef = useRef(gameType);
@@ -112,7 +121,7 @@ const App: React.FC = () => {
   useEffect(() => { myColorRef.current = myColor; }, [myColor]);
   useEffect(() => { onlineStatusRef.current = onlineStatus; }, [onlineStatus]);
 
-  // Handle Audio Initialization
+  // Handle Audio Initialization ... (保留原样)
   useEffect(() => {
      sfxMove.current = new Audio('/move.mp3');
      sfxCapture.current = new Audio('/capture.mp3');
@@ -122,8 +131,8 @@ const App: React.FC = () => {
   }, []);
 
   const playSfx = (type: 'move' | 'capture' | 'error' | 'win' | 'lose') => {
+      // ... (保留原样)
       if (musicVolume === 0) return; 
-      
       const play = (ref: React.MutableRefObject<HTMLAudioElement | null>) => {
           if (ref.current) {
               ref.current.currentTime = 0;
@@ -131,7 +140,6 @@ const App: React.FC = () => {
               ref.current.play().catch(() => {});
           }
       };
-
       switch(type) {
           case 'move': play(sfxMove); break;
           case 'capture': play(sfxCapture); break;
@@ -141,76 +149,23 @@ const App: React.FC = () => {
       }
   };
 
+  // ... (保留 Audio useEffects, Settings sync, applySettingsAndRestart) ...
   useEffect(() => {
-    const startAudio = () => {
-        if (!hasInteracted) {
-            setHasInteracted(true);
-            if (bgmRef.current && musicVolume > 0 && bgmRef.current.paused) {
-                bgmRef.current.play().catch(e => console.log('Autoplay deferred:', e));
-            }
-        }
-    };
-    
+    const startAudio = () => { if (!hasInteracted) { setHasInteracted(true); if (bgmRef.current && musicVolume > 0 && bgmRef.current.paused) { bgmRef.current.play().catch(e => console.log('Autoplay deferred:', e)); } } };
     document.addEventListener('click', startAudio);
     return () => document.removeEventListener('click', startAudio);
   }, [hasInteracted, musicVolume]);
 
-  useEffect(() => {
-    if (bgmRef.current) {
-        bgmRef.current.volume = musicVolume;
-        if (musicVolume > 0 && bgmRef.current.paused && hasInteracted) {
-             bgmRef.current.play().catch(e => console.log("Play blocked", e));
-        } else if (musicVolume === 0) {
-            bgmRef.current.pause();
-        }
-    }
-  }, [musicVolume, hasInteracted]);
+  useEffect(() => { if (bgmRef.current) { bgmRef.current.volume = musicVolume; if (musicVolume > 0 && bgmRef.current.paused && hasInteracted) { bgmRef.current.play().catch(e => console.log("Play blocked", e)); } else if (musicVolume === 0) { bgmRef.current.pause(); } } }, [musicVolume, hasInteracted]);
 
-  // Sync temp settings when menu opens
-  useEffect(() => {
-      if (showMenu) {
-          setTempBoardSize(boardSize);
-          setTempGameType(gameType);
-          setTempDifficulty(difficulty);
-          setTempGameMode(gameMode);
-      }
-  }, [showMenu, boardSize, gameType, difficulty, gameMode]);
+  useEffect(() => { if (showMenu) { setTempBoardSize(boardSize); setTempGameType(gameType); setTempDifficulty(difficulty); setTempGameMode(gameMode); } }, [showMenu, boardSize, gameType, difficulty, gameMode]);
 
   const applySettingsAndRestart = () => {
-      setBoardSize(tempBoardSize);
-      setGameType(tempGameType);
-      setDifficulty(tempDifficulty);
-      setGameMode(tempGameMode);
+      // ... (保留原样，但在最后加入 cleanupOnline 逻辑)
+      setBoardSize(tempBoardSize); setGameType(tempGameType); setDifficulty(tempDifficulty); setGameMode(tempGameMode);
+      setBoard(createBoard(tempBoardSize)); setCurrentPlayer('black'); setBlackCaptures(0); setWhiteCaptures(0); setLastMove(null); setGameOver(false); setWinner(null); setWinReason(''); setConsecutivePasses(0); setPassNotificationDismissed(false); setFinalScore(null); setHistory([]); setShowMenu(false); setShowPassModal(false); setIsThinking(false); setAppMode('playing');
       
-      // Reset logic
-      setBoard(createBoard(tempBoardSize));
-      setCurrentPlayer('black');
-      setBlackCaptures(0);
-      setWhiteCaptures(0);
-      setLastMove(null);
-      setGameOver(false);
-      setWinner(null);
-      setWinReason('');
-      setConsecutivePasses(0);
-      setPassNotificationDismissed(false);
-      setFinalScore(null);
-      setHistory([]);
-      setShowMenu(false);
-      setShowPassModal(false);
-      setIsThinking(false);
-      setAppMode('playing');
-      
-      // Cleanup online if needed
-      if (onlineStatusRef.current === 'connected') {
-          sendData({ type: 'RESTART' });
-          setOnlineStatus('disconnected');
-          setMyColor(null);
-          if (pollingRef.current) clearInterval(pollingRef.current);
-          if (pcRef.current) {
-             pcRef.current.close();
-             pcRef.current = null;
-          }
-      }
+      cleanupOnline(); // 清理在线状态
   };
 
   // --- Helper: Board Stringify for Ko ---
@@ -220,110 +175,265 @@ const App: React.FC = () => {
       return str;
   };
 
-  // --- Online Logic ---
-  useEffect(() => {
-      return () => {
-          if (pollingRef.current) clearInterval(pollingRef.current);
-          if (pcRef.current) pcRef.current.close();
-      };
-  }, []);
+  // ----------------------------------------------------------------
+  // --- 核心网络逻辑重构开始 ---
+  // ----------------------------------------------------------------
 
-  useEffect(() => {
-      if (showOnlineMenu && !peerId && onlineStatus === 'disconnected') {
-          createRoom();
-      }
-  }, [showOnlineMenu, peerId, onlineStatus]);
+  // 1. 获取 ICE 服务器 (加入国内优化)
+  const getIceServers = async () => {
+    // 国内极速 STUN
+    const publicStunServers = [
+        "stun:stun.qq.com:3478",
+        "stun:stun.miwifi.com:3478",
+        "stun:stun.chat.bilibili.com:3478"
+    ];
 
-  const resetGame = (keepOnline: boolean = false) => {
-    setBoard(createBoard(boardSize)); setCurrentPlayer('black'); setBlackCaptures(0); setWhiteCaptures(0); setLastMove(null); setGameOver(false); setWinner(null); setWinReason(''); setConsecutivePasses(0); setPassNotificationDismissed(false); setFinalScore(null); setHistory([]); setShowMenu(false); setShowPassModal(false); setIsThinking(false); setAppMode('playing');
-    if (onlineStatusRef.current === 'connected' && !keepOnline) sendData({ type: 'RESTART' });
-    if (!keepOnline) { setOnlineStatus('disconnected'); setMyColor(null); if (pollingRef.current) clearInterval(pollingRef.current); if (pcRef.current) { pcRef.current.close(); pcRef.current = null; } }
+    let turnServers = [];
+    // 尝试获取 TURN 作为备用 (可选)
+    try {
+        const res = await fetch(`${WORKER_URL}/ice-servers`, { method: 'POST' });
+        const data = await res.json();
+        if (data && data.iceServers) turnServers = data.iceServers;
+    } catch (e) {
+        console.log("TURN 获取失败，仅使用 STUN");
+    }
+
+    return [
+        { urls: publicStunServers }, 
+        ...turnServers
+    ];
   };
 
+  // 2. 发送信号到 Supabase 频道
+  const sendSignal = async (roomId: string, payload: SignalMessage) => {
+    console.log(`[发送信号] -> 类型: ${payload.type}`, payload);
+    try {
+        await supabase.channel(`room_${roomId}`).send({
+            type: 'broadcast',
+            event: 'signal',
+            payload
+        });
+    } catch (error) {
+        console.error("信号发送失败:", error);
+    }
+  };
+
+  // 3. 统一初始化 WebRTC 连接
+  const setupPeerConnection = async (roomId: string, isHost: boolean) => {
+    console.log(`[WebRTC] 初始化 PeerConnection... (Host: ${isHost})`);
+    
+    // 清理旧连接
+    if (pcRef.current) pcRef.current.close();
+
+    const iceServers = await getIceServers();
+    const pc = new RTCPeerConnection({
+        iceServers,
+        iceTransportPolicy: 'all',
+        bundlePolicy: 'max-bundle'
+    });
+    pcRef.current = pc;
+
+    // ICE 候选处理 (Trickle ICE) - 关键加速点
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            console.log("[WebRTC] 发现 ICE 候选者，立即发送...");
+            sendSignal(roomId, { type: 'ice', candidate: event.candidate.toJSON() });
+        }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+        console.log(`[WebRTC] 连接状态变更: ${pc.iceConnectionState}`);
+        if (pc.iceConnectionState === 'connected') {
+            setOnlineStatus('connected');
+        } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+            setOnlineStatus('disconnected');
+            alert("连接断开");
+        }
+    };
+
+    // 设置数据通道
+    if (isHost) {
+        // 房主创建通道
+        console.log("[WebRTC] 创建 DataChannel...");
+        const dc = pc.createDataChannel("game-channel");
+        setupDataChannel(dc, true);
+    } else {
+        // 客人监听通道
+        pc.ondatachannel = (event) => {
+            console.log("[WebRTC] 收到 DataChannel...");
+            setupDataChannel(event.channel, false);
+        };
+    }
+
+    return pc;
+  };
+
+  // 4. 数据通道逻辑 (处理游戏消息)
   const setupDataChannel = (dc: RTCDataChannel, isHost: boolean) => {
     dataChannelRef.current = dc;
     dc.onopen = () => {
+        console.log("[DataChannel] 通道已打开！");
         setOnlineStatus('connected');
         setShowOnlineMenu(false);
         setShowMenu(false);
         setGameMode('PvP');
+        
         if (isHost) {
              setMyColor('black');
              resetGame(true);
-             const syncMsg: PeerMessage = { type: 'SYNC', boardSize: boardSize, gameType: gameTypeRef.current, startColor: 'white' };
-             dc.send(JSON.stringify(syncMsg));
+             // 同步初始状态
+             if (dc.readyState === 'open') {
+                 dc.send(JSON.stringify({ 
+                     type: 'SYNC', 
+                     boardSize: boardSize, 
+                     gameType: gameTypeRef.current, 
+                     startColor: 'white' 
+                 }));
+             }
         }
     };
     dc.onmessage = (e) => {
-        const msg = JSON.parse(e.data) as PeerMessage;
+        // console.log("[DataChannel] 收到消息:", e.data); // 消息太频繁可以注释掉
+        const msg = JSON.parse(e.data);
         if (msg.type === 'MOVE') executeMove(msg.x, msg.y, true);
         else if (msg.type === 'PASS') handlePass(true);
         else if (msg.type === 'SYNC') { setBoardSize(msg.boardSize); setGameType(msg.gameType); setMyColor(msg.startColor); resetGame(true); }
         else if (msg.type === 'RESTART') resetGame(true);
     };
-    dc.onclose = () => { setOnlineStatus('disconnected'); alert("对方已断开连接"); setMyColor(null); if (pollingRef.current) clearInterval(pollingRef.current); };
+    dc.onclose = () => { 
+        console.log("[DataChannel] 通道关闭");
+        setOnlineStatus('disconnected'); 
+        setMyColor(null); 
+    };
   };
 
-  const sendData = (msg: PeerMessage) => { if (dataChannelRef.current?.readyState === 'open') dataChannelRef.current.send(JSON.stringify(msg)); };
-  
-  const getIceServers = async () => {
-      try { const res = await fetch(`${WORKER_URL}/ice-servers`, { method: 'POST' }); const data = await res.json(); if (data && data.iceServers) return data.iceServers; } catch (e) {} return []; 
+  // 清理函数
+  const cleanupOnline = () => {
+      if (channelRef.current) {
+          supabase.removeChannel(channelRef.current);
+          channelRef.current = null;
+      }
+      if (pcRef.current) {
+          pcRef.current.close();
+          pcRef.current = null;
+      }
+      setOnlineStatus('disconnected');
   };
 
+  useEffect(() => {
+      return () => cleanupOnline();
+  }, []);
+
+  // --- 创建房间 (Host) ---
   const createRoom = async () => {
-      if (pcRef.current && pcRef.current.signalingState !== 'closed') return;
-      const turnServers = await getIceServers();
+      cleanupOnline(); // 先清理
+
       const id = Math.floor(100000 + Math.random() * 900000).toString();
       setPeerId(id);
-      const pc = new RTCPeerConnection({ iceServers: [...turnServers], iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' });
-      pcRef.current = pc;
-      const dc = pc.createDataChannel("game-channel");
-      setupDataChannel(dc, true);
-      let isOfferSent = false; 
-      const doSendOffer = async () => { if (isOfferSent) return; isOfferSent = true; try { await fetch(`${WORKER_URL}/create-room`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: id, sdp: pc.localDescription }) }); startPolling(id); } catch (e) {} };
-      pc.onicecandidate = (event) => { if (event.candidate === null) doSendOffer(); };
-      setTimeout(doSendOffer, 800);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-  };
+      setOnlineStatus('connecting');
+      console.log(`[Supabase] 正在创建房间 ${id}，订阅频道...`);
 
-  const startPolling = (id: string) => {
-    if (pollingRef.current) clearInterval(pollingRef.current);
-    pollingRef.current = window.setInterval(async () => {
-        try {
-            if (pcRef.current && (pcRef.current.signalingState === 'stable' || pcRef.current.iceConnectionState === 'connected')) { if (pollingRef.current) clearInterval(pollingRef.current); setOnlineStatus('connected'); setMyColor('black'); return; }
-            const res = await fetch(`${WORKER_URL}/check-status?roomId=${id}`);
-            const data = await res.json();
-            if (data && data.status === 'connected' && data.guestSdp) {
-                if (pcRef.current && pcRef.current.signalingState !== 'have-local-offer') { if (pollingRef.current) clearInterval(pollingRef.current); setOnlineStatus('connected'); setMyColor('black'); return; }
-                try { await pcRef.current?.setRemoteDescription(new RTCSessionDescription(data.guestSdp)); } catch (err: any) {}
-                if (pollingRef.current) clearInterval(pollingRef.current); setOnlineStatus('connected'); setMyColor('black');
+      const channel = supabase.channel(`room_${id}`);
+      channelRef.current = channel;
+
+      channel
+        .on('broadcast', { event: 'signal' }, async ({ payload }: { payload: SignalMessage }) => {
+            const pc = pcRef.current;
+            console.log(`[Supabase] 收到信号: ${payload.type}`);
+
+            if (payload.type === 'join') {
+                // 客人加入了 -> 创建 Offer
+                console.log("[流程] 客人加入，开始创建 Offer...");
+                const newPc = await setupPeerConnection(id, true);
+                const offer = await newPc.createOffer();
+                await newPc.setLocalDescription(offer);
+                await sendSignal(id, { type: 'offer', sdp: newPc.localDescription! });
             }
-        } catch (e) {}
-    }, 800);
+            else if (payload.type === 'answer' && payload.sdp && pc) {
+                console.log("[流程] 收到 Answer，设置远程描述...");
+                await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+            }
+            else if (payload.type === 'ice' && payload.candidate && pc) {
+                console.log("[流程] 添加对方 ICE 候选...");
+                await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+            }
+        })
+        .subscribe((status) => {
+            console.log(`[Supabase] 订阅状态: ${status}`);
+            if (status === 'SUBSCRIBED') {
+                // 订阅成功，等待客人
+            }
+        });
   };
 
-    const joinRoom = async () => {
-        if (!remotePeerId) return;
-        setOnlineStatus('connecting');
-        const turnServers = await getIceServers();
-        const pc = new RTCPeerConnection({ iceServers: [...turnServers], iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' });
-        pcRef.current = pc;
-        pc.ondatachannel = (event) => setupDataChannel(event.channel, false);
-        let isAnswerSent = false;
-        const doSendAnswer = async () => { if (isAnswerSent || !pc.localDescription) return; isAnswerSent = true; try { await fetch(`${WORKER_URL}/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: remotePeerId, sdp: pc.localDescription }) }); } catch (e) {} };
-        pc.onicecandidate = (event) => { if (event.candidate === null) doSendAnswer(); };
-        setTimeout(doSendAnswer, 2000);
-        try {
-            const res = await fetch(`${WORKER_URL}/join-room`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: remotePeerId }) });
-            if (!res.ok) { alert("房间不存在或已过期"); setOnlineStatus('disconnected'); return; }
-            const { hostSdp } = await res.json();
-            await pc.setRemoteDescription(new RTCSessionDescription(hostSdp));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer); 
-        } catch (e) { setOnlineStatus('disconnected'); alert("加入失败，请检查网络或房间号"); }
-    };
+  // --- 加入房间 (Guest) ---
+  const joinRoom = async () => {
+      if (!remotePeerId) return;
+      cleanupOnline(); // 先清理
 
+      setOnlineStatus('connecting');
+      console.log(`[Supabase] 正在加入房间 ${remotePeerId}...`);
+
+      const channel = supabase.channel(`room_${remotePeerId}`);
+      channelRef.current = channel;
+
+      channel
+        .on('broadcast', { event: 'signal' }, async ({ payload }: { payload: SignalMessage }) => {
+            console.log(`[Supabase] 收到信号: ${payload.type}`);
+            let pc = pcRef.current;
+
+            if (payload.type === 'offer' && payload.sdp) {
+                console.log("[流程] 收到 Offer，开始创建 Answer...");
+                if (!pc) pc = await setupPeerConnection(remotePeerId, false);
+                
+                await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                
+                await sendSignal(remotePeerId, { type: 'answer', sdp: pc.localDescription! });
+            }
+            else if (payload.type === 'ice' && payload.candidate) {
+                // 如果收到 ICE 时 PC 还没好，可能需要暂存，但 Supabase 速度通常够快
+                if (pc) {
+                    console.log("[流程] 添加对方 ICE 候选...");
+                    await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+                }
+            }
+        })
+        .subscribe(async (status) => {
+            console.log(`[Supabase] 订阅状态: ${status}`);
+            if (status === 'SUBSCRIBED') {
+                // 订阅成功 -> 喊话房主
+                console.log("[流程] 订阅成功，发送 join 信号...");
+                // 预先初始化 PC 以便接收 Offer
+                await setupPeerConnection(remotePeerId, false);
+                await sendSignal(remotePeerId, { type: 'join' });
+            }
+        });
+  };
+
+  // ----------------------------------------------------------------
+  // --- 网络逻辑重构结束 ---
+  // ----------------------------------------------------------------
+
+  const resetGame = (keepOnline: boolean = false) => {
+    setBoard(createBoard(boardSize)); setCurrentPlayer('black'); setBlackCaptures(0); setWhiteCaptures(0); setLastMove(null); setGameOver(false); setWinner(null); setWinReason(''); setConsecutivePasses(0); setPassNotificationDismissed(false); setFinalScore(null); setHistory([]); setShowMenu(false); setShowPassModal(false); setIsThinking(false); setAppMode('playing');
+    
+    // 如果是本地重置，发个消息给对面
+    if (onlineStatusRef.current === 'connected' && !keepOnline) {
+        if (dataChannelRef.current?.readyState === 'open') {
+             dataChannelRef.current.send(JSON.stringify({ type: 'RESTART' }));
+        }
+    }
+    
+    if (!keepOnline) { 
+        cleanupOnline();
+        setMyColor(null);
+    }
+  };
+
+  const sendData = (msg: any) => { if (dataChannelRef.current?.readyState === 'open') dataChannelRef.current.send(JSON.stringify(msg)); };
+  
   const copyId = () => { navigator.clipboard.writeText(peerId); setCopied(true); setTimeout(() => setCopied(false), 2000); };
   const copyGameState = () => { const stateStr = serializeGame(board, currentPlayer, gameType, blackCaptures, whiteCaptures); navigator.clipboard.writeText(stateStr); setGameCopied(true); setTimeout(() => setGameCopied(false), 2000); };
 
@@ -335,7 +445,8 @@ const App: React.FC = () => {
       } else { alert('无效的棋局密钥'); }
   };
   
-  // --- Game Logic ---
+  // ... (保留 handleUndo, executeMove, handleIntersectionClick, handlePass, endGame 等逻辑) ...
+  // 注意：executeMove 里调用的 sendData 逻辑已经适配了上面的修改
   const handleUndo = () => {
       if (history.length === 0 || isThinking || gameOver || onlineStatus === 'connected') return;
       let stepsToUndo = 1;
@@ -370,7 +481,11 @@ const App: React.FC = () => {
     }
     if (gameOver || isThinking) return;
     if (gameMode === 'PvAI' && currentPlayer === 'white') return;
-    if (onlineStatus === 'connected') { if (currentPlayer !== myColor) return; sendData({ type: 'MOVE', x, y }); }
+    // 在线逻辑
+    if (onlineStatus === 'connected') { 
+        if (currentPlayer !== myColor) return; // 不是我的回合
+        sendData({ type: 'MOVE', x, y }); 
+    }
     executeMove(x, y, false);
   }, [gameOver, gameMode, currentPlayer, onlineStatus, myColor, isThinking, appMode, setupTool, board]);
 
@@ -389,7 +504,7 @@ const App: React.FC = () => {
 
   const endGame = (winner: Player, reason: string) => { setGameOver(true); setWinner(winner); setWinReason(reason); if (gameMode === 'PvAI') { if (winner === 'black') playSfx('win'); else playSfx('lose'); } else if (onlineStatus === 'connected') { if (winner === myColor) playSfx('win'); else playSfx('lose'); } else { playSfx('win'); } };
 
-  // AI Turn Handling
+  // AI Turn Handling ... (保留)
   useEffect(() => {
     if (appMode === 'playing' && gameMode === 'PvAI' && currentPlayer === 'white' && !gameOver && !showPassModal) {
       setIsThinking(true);
@@ -407,17 +522,15 @@ const App: React.FC = () => {
   const startSetup = () => { resetGame(false); setAppMode('setup'); setShowMenu(false); };
   const finishSetup = () => { setAppMode('playing'); setHistory([]); };
 
-  // Display Board Logic
+  // ... (保留 Render 逻辑和 UI) ...
   const currentDisplayBoard = appMode === 'review' && history[reviewIndex] ? history[reviewIndex].board : board;
   const currentDisplayLastMove = appMode === 'review' && history[reviewIndex] ? history[reviewIndex].lastMove : lastMove;
   const winRate = showWinRate && !gameOver && appMode === 'playing' ? calculateWinRate(board) : 50;
   const getSliderBackground = (val: number, min: number, max: number) => { const percentage = ((val - min) / (max - min)) * 100; return `linear-gradient(to right, #5d4037 ${percentage}%, #d4b483 ${percentage}%)`; };
 
-  // --- Render Stone Icon ---
   const RenderStoneIcon = ({ color }: { color: 'black' | 'white' }) => {
     const filterId = color === 'black' ? 'url(#global-jelly-black)' : 'url(#global-jelly-white)';
     const fillColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
-    
     return (
         <div className="w-8 h-8 flex items-center justify-center relative">
             <svg viewBox="0 0 24 24" className="w-full h-full overflow-visible">
@@ -427,13 +540,16 @@ const App: React.FC = () => {
     );
   };
 
+  // ... (保留 JSX 返回部分，UI 代码不需要改动) ...
+  // 只需要确保 UI 中的按钮调用的是更新后的 joinRoom 和 createRoom 即可 (名字没变，逻辑变了)
   return (
     <div className="h-full w-full bg-[#f7e7ce] flex flex-col md:flex-row items-center relative select-none overflow-hidden text-[#5c4033]">
       
       <audio ref={bgmRef} loop src="/bgm.mp3" />
 
       {/* --- BOARD AREA --- */}
-      <div className="relative flex-grow h-[60%] md:h-full w-full flex items-center justify-center p-2 order-2 md:order-1 min-h-0">
+      {/* ... (这里代码保持不变) ... */}
+       <div className="relative flex-grow h-[60%] md:h-full w-full flex items-center justify-center p-2 order-2 md:order-1 min-h-0">
           <div className="w-full h-full max-w-full max-h-full aspect-square flex items-center justify-center">
              <div className="transform transition-transform w-full h-full">
                 <GameBoard 
@@ -453,7 +569,8 @@ const App: React.FC = () => {
                   AI 正在思考...
               </div>
           )}
-
+          
+          {/* ... (Pass Notification UI 保持不变) ... */}
           {consecutivePasses === 1 && !gameOver && !passNotificationDismissed && (
                <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
                     <div className="bg-[#fff8e1] border-4 border-[#cba367] text-[#5c4033] px-6 py-6 rounded-3xl shadow-2xl flex flex-col items-center animate-in zoom-in duration-300 w-64 pointer-events-auto">
@@ -476,8 +593,8 @@ const App: React.FC = () => {
       </div>
 
       {/* --- SIDEBAR --- */}
+      {/* ... (这里代码保持不变) ... */}
       <div className="w-full md:w-80 lg:w-96 flex flex-col gap-4 p-4 z-20 shrink-0 bg-[#f7e7ce] md:bg-[#f2e6d6] md:h-full md:border-l-4 md:border-[#e3c086] order-1 md:order-2 shadow-xl md:shadow-none">
-        
         {/* Header */}
         <div className="flex justify-between items-center">
             <div className="flex flex-col">
@@ -505,6 +622,7 @@ const App: React.FC = () => {
             </button>
         </div>
 
+        {/* ... (Score Card 保持不变) ... */}
         {/* Score Card */}
         <div className="flex flex-col gap-2">
             <div className="grid grid-cols-2 gap-3">
@@ -541,9 +659,9 @@ const App: React.FC = () => {
             )}
         </div>
 
-        {/* Action Controls */}
+        {/* ... (Control Buttons 保持不变) ... */}
+         {/* Action Controls */}
         <div className="mt-auto">
-            
             {/* SETUP MODE CONTROLS */}
             {appMode === 'setup' && (
                 <div className="grid grid-cols-4 gap-2 mb-2">
@@ -606,7 +724,8 @@ const App: React.FC = () => {
         <div className="hidden md:block flex-grow"></div>
       </div>
 
-      {/* --- SETTINGS MENU --- */}
+      {/* --- SETTINGS MENU (保持不变) --- */}
+      {/* ... (这里代码保持不变) ... */}
       {showMenu && (
         <div className="absolute inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-[#fcf6ea] rounded-[2rem] w-full max-w-sm shadow-2xl border-[6px] border-[#8c6b38] flex flex-col max-h-[90vh] overflow-hidden relative">
@@ -623,7 +742,7 @@ const App: React.FC = () => {
                 <div className="space-y-4">
                     <h3 className="text-sm font-bold text-[#8c6b38] uppercase tracking-widest mb-1">游戏模式</h3>
                     
-                    {/* Game Type & Mode Toggles - Recessed Track Slider Style */}
+                    {/* Game Type & Mode Toggles */}
                     <div className="space-y-4">
                         
                         {/* Type Slider */}
@@ -661,7 +780,7 @@ const App: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* Board Size - Simplified UI */}
+                    {/* Board Size */}
                     <div className="px-2 pt-2">
                         <div className="flex justify-between items-end mb-2">
                             <span className="text-sm font-bold text-[#5c4033]">棋盘大小</span>
@@ -682,7 +801,7 @@ const App: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* Difficulty - Hidden if PvP */}
+                    {/* Difficulty */}
                     {tempGameMode === 'PvAI' && (
                         <div className="grid grid-cols-3 gap-2 animate-in fade-in slide-in-from-top-2 pt-2">
                             {(['Easy', 'Medium', 'Hard'] as Difficulty[]).map((level) => (
@@ -700,7 +819,6 @@ const App: React.FC = () => {
                 <div className="space-y-4">
                     <h3 className="text-sm font-bold text-[#8c6b38] uppercase tracking-widest mb-1">辅助与音效</h3>
                     
-                    {/* Horizontal Buttons: Icon Left, Text Right */}
                     <div className="flex gap-2 justify-between">
                         <button onClick={() => setShowWinRate(!showWinRate)} className={`btn-retro flex-1 flex flex-row items-center justify-center gap-2 px-2 py-3 rounded-xl ${showWinRate ? 'bg-[#8c6b38] border-[#5c4033] text-[#fcf6ea]' : 'bg-[#fff] border-[#e3c086] text-[#8c6b38]'}`}>
                             <BarChart3 size={18} />
@@ -761,7 +879,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* ONLINE MENU */}
+      {/* ONLINE MENU (保持不变) */}
+      {/* ... (这里代码保持不变) ... */}
       {showOnlineMenu && (
         <div className="absolute inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
              <div className="bg-[#fcf6ea] rounded-3xl p-6 w-full max-w-sm shadow-2xl border-[6px] border-[#5c4033] relative overflow-hidden text-center">
@@ -808,7 +927,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* IMPORT / EXPORT MODAL */}
+      {/* IMPORT / EXPORT MODAL (保持不变) */}
+      {/* ... (这里代码保持不变) ... */}
       {showImportModal && (
         <div className="absolute inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
             <div className="bg-[#fcf6ea] rounded-3xl p-6 w-full max-w-sm shadow-2xl border-[6px] border-[#5c4033] relative">
@@ -845,7 +965,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* GAME OVER MODAL */}
+      {/* GAME OVER MODAL (保持不变) */}
+      {/* ... (这里代码保持不变) ... */}
       {gameOver && !showMenu && (
         <div className="absolute inset-0 z-40 flex items-center justify-center p-4 pointer-events-auto">
             <div className="absolute inset-0 bg-black/20 backdrop-blur-[2px]" onClick={() => {}} />
