@@ -220,7 +220,7 @@ const App: React.FC = () => {
       return str;
   };
 
-  // --- Online Logic --- (Same as before, abbreviated for readability)
+  // --- Online Logic ---
   useEffect(() => {
       return () => {
           if (pollingRef.current) clearInterval(pollingRef.current);
@@ -234,6 +234,12 @@ const App: React.FC = () => {
       }
   }, [showOnlineMenu, peerId, onlineStatus]);
 
+  const resetGame = (keepOnline: boolean = false) => {
+    setBoard(createBoard(boardSize)); setCurrentPlayer('black'); setBlackCaptures(0); setWhiteCaptures(0); setLastMove(null); setGameOver(false); setWinner(null); setWinReason(''); setConsecutivePasses(0); setPassNotificationDismissed(false); setFinalScore(null); setHistory([]); setShowMenu(false); setShowPassModal(false); setIsThinking(false); setAppMode('playing');
+    if (onlineStatusRef.current === 'connected' && !keepOnline) sendData({ type: 'RESTART' });
+    if (!keepOnline) { setOnlineStatus('disconnected'); setMyColor(null); if (pollingRef.current) clearInterval(pollingRef.current); if (pcRef.current) { pcRef.current.close(); pcRef.current = null; } }
+  };
+
   const setupDataChannel = (dc: RTCDataChannel, isHost: boolean) => {
     dataChannelRef.current = dc;
     dc.onopen = () => {
@@ -243,6 +249,7 @@ const App: React.FC = () => {
         setGameMode('PvP');
         if (isHost) {
              setMyColor('black');
+             resetGame(true);
              const syncMsg: PeerMessage = { type: 'SYNC', boardSize: boardSize, gameType: gameTypeRef.current, startColor: 'white' };
              dc.send(JSON.stringify(syncMsg));
         }
@@ -268,7 +275,7 @@ const App: React.FC = () => {
       const turnServers = await getIceServers();
       const id = Math.floor(100000 + Math.random() * 900000).toString();
       setPeerId(id);
-      const pc = new RTCPeerConnection({ iceServers: [...turnServers, { urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' });
+      const pc = new RTCPeerConnection({ iceServers: [...turnServers], iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' });
       pcRef.current = pc;
       const dc = pc.createDataChannel("game-channel");
       setupDataChannel(dc, true);
@@ -293,14 +300,14 @@ const App: React.FC = () => {
                 if (pollingRef.current) clearInterval(pollingRef.current); setOnlineStatus('connected'); setMyColor('black');
             }
         } catch (e) {}
-    }, 3000);
+    }, 800);
   };
 
     const joinRoom = async () => {
         if (!remotePeerId) return;
         setOnlineStatus('connecting');
         const turnServers = await getIceServers();
-        const pc = new RTCPeerConnection({ iceServers: [...turnServers, { urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' });
+        const pc = new RTCPeerConnection({ iceServers: [...turnServers], iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' });
         pcRef.current = pc;
         pc.ondatachannel = (event) => setupDataChannel(event.channel, false);
         let isAnswerSent = false;
@@ -396,12 +403,6 @@ const App: React.FC = () => {
     }
   }, [currentPlayer, gameMode, board, gameOver, gameType, difficulty, showPassModal, handlePass, history, appMode]);
 
-  const resetGame = (keepOnline: boolean = false) => {
-    setBoard(createBoard(boardSize)); setCurrentPlayer('black'); setBlackCaptures(0); setWhiteCaptures(0); setLastMove(null); setGameOver(false); setWinner(null); setWinReason(''); setConsecutivePasses(0); setPassNotificationDismissed(false); setFinalScore(null); setHistory([]); setShowMenu(false); setShowPassModal(false); setIsThinking(false); setAppMode('playing');
-    if (onlineStatusRef.current === 'connected' && !keepOnline) sendData({ type: 'RESTART' });
-    if (!keepOnline) { setOnlineStatus('disconnected'); setMyColor(null); if (pollingRef.current) clearInterval(pollingRef.current); if (pcRef.current) { pcRef.current.close(); pcRef.current = null; } }
-  };
-
   const startReview = () => { setAppMode('review'); setReviewIndex(history.length - 1); setGameOver(false); };
   const startSetup = () => { resetGame(false); setAppMode('setup'); setShowMenu(false); };
   const finishSetup = () => { setAppMode('playing'); setHistory([]); };
@@ -413,7 +414,6 @@ const App: React.FC = () => {
   const getSliderBackground = (val: number, min: number, max: number) => { const percentage = ((val - min) / (max - min)) * 100; return `linear-gradient(to right, #5d4037 ${percentage}%, #d4b483 ${percentage}%)`; };
 
   // --- Render Stone Icon ---
-  // Renders a simple SVG circle with the global filter to match the game board
   const RenderStoneIcon = ({ color }: { color: 'black' | 'white' }) => {
     const filterId = color === 'black' ? 'url(#global-jelly-black)' : 'url(#global-jelly-white)';
     const fillColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
