@@ -6,6 +6,11 @@ import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Glob
 
 // --- Configuration ---
 const WORKER_URL = 'yesterhaze.codes';
+const turnConfig = {
+    urls: 'turn:turn.cloudflare.com:5349', // Cloudflare TURN 标准端口
+    username: 'bc43ee30beac949e3717a1e3a6128089', // 你的 TURN 令牌
+    credential: '8b65f8ec9b8ca32b6ace1c09daf23baa9cc7955f8065b803b25332cdb460dfc8' // 你的 API 令牌
+};
 
 // Types for P2P Messages
 type PeerMessage = 
@@ -234,19 +239,11 @@ const App: React.FC = () => {
     const pc = new RTCPeerConnection({
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            // --- 关键：添加免费的 TURN 服务器中转 ---
-            {
-                urls: 'turn:openrelay.metered.ca:443',
-                username: 'openrelayproject',
-                password: 'openrelayproject'
-            },
-            {
-                urls: 'turn:openrelay.metered.ca:80',
-                username: 'openrelayproject',
-                password: 'openrelayproject'
-            }
-        ]
+            // 使用你刚才获取的 Cloudflare TURN
+            turnConfig 
+        ],
+        iceTransportPolicy: 'all', // 允许所有连接方式
+        bundlePolicy: 'max-bundle' // 优化连接
     });
     pcRef.current = pc;
 
@@ -301,19 +298,11 @@ const App: React.FC = () => {
     const pc = new RTCPeerConnection({
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            // --- 同样添加 TURN 服务器 ---
-            {
-                urls: 'turn:openrelay.metered.ca:443',
-                username: 'openrelayproject',
-                password: 'openrelayproject'
-            },
-            {
-                urls: 'turn:openrelay.metered.ca:80',
-                username: 'openrelayproject',
-                password: 'openrelayproject'
-            }
-        ]
+            // 使用你刚才获取的 Cloudflare TURN
+            turnConfig
+        ],
+        iceTransportPolicy: 'all',
+        bundlePolicy: 'max-bundle'
     });
     pcRef.current = pc;
 
