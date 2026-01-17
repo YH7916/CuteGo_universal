@@ -5,7 +5,7 @@ import { createBoard, attemptMove, getAIMove, checkGomokuWin, calculateScore, ca
 import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Globe, Copy, Check, Wind, Volume2, VolumeX, BarChart3, Skull, Undo2, AlertCircle, X } from 'lucide-react';
 
 // --- Configuration ---
-const WORKER_URL = 'api.yesterhaze.codes';
+const WORKER_URL = 'https://api.yesterhaze.codes';
 const turnConfig = {
     urls: 'turn:turn.cloudflare.com:5349', // Cloudflare TURN 标准端口
     username: 'bc43ee30beac949e3717a1e3a6128089', // 你的 TURN 令牌
