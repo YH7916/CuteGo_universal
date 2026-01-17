@@ -8,20 +8,20 @@ import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Glob
 const WORKER_URL = 'https://api.yesterhaze.codes';
 
 const turnConfig = [
-    // 1. 标准 UDP (速度最快，优先尝试)
+    // 1. 【改动】使用标准端口 3478 UDP (原来是 5349，容易被封)
     {
-        urls: 'turn:turn.cloudflare.com:5349?transport=udp',
+        urls: 'turn:turn.cloudflare.com:3478?transport=udp',
         username: '3bb5ecca232b7084cba699da2a2786e8',
         credential: 'ba05c592e0930be2ef64d5253744225627aadd7183f0198c3d34a13f5b0f23b1'
     },
-    // 2. 标准 TCP (如果 UDP 被封，尝试这个)
+    // 2. 【改动】使用标准端口 3478 TCP
     {
-        urls: 'turn:turn.cloudflare.com:5349?transport=tcp',
+        urls: 'turn:turn.cloudflare.com:3478?transport=tcp',
         username: '3bb5ecca232b7084cba699da2a2786e8',
         credential: 'ba05c592e0930be2ef64d5253744225627aadd7183f0198c3d34a13f5b0f23b1'
     },
-    // 3. 终极穿墙方案: TURNS over TLS (端口 443, 伪装成 HTTPS)
-    // 这是最容易穿透防火墙的，但延迟稍微高一点点
+    // 3. 终极方案: TURNS over TLS (端口 443)
+    // 这个配置本身没问题，但必须确保它是作为备选方案存在
     {
         urls: 'turns:turn.cloudflare.com:443?transport=tcp',
         username: '3bb5ecca232b7084cba699da2a2786e8',
