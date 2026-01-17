@@ -6,11 +6,28 @@ import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Glob
 
 // --- Configuration ---
 const WORKER_URL = 'https://api.yesterhaze.codes';
-const turnConfig = {
-    urls: 'turn:turn.cloudflare.com:5349', // Cloudflare TURN 标准端口
-    username: 'bc43ee30beac949e3717a1e3a6128089', // 你的 TURN 令牌
-    credential: '8b65f8ec9b8ca32b6ace1c09daf23baa9cc7955f8065b803b25332cdb460dfc8' // 你的 API 令牌
-};
+
+const turnConfig = [
+    // 1. 标准 UDP (速度最快，优先尝试)
+    {
+        urls: 'turn:turn.cloudflare.com:5349?transport=udp',
+        username: 'bc43ee30beac949e3717a1e3a6128089',
+        credential: '8b65f8ec9b8ca32b6ace1c09daf23baa9cc7955f8065b803b25332cdb460dfc8'
+    },
+    // 2. 标准 TCP (如果 UDP 被封，尝试这个)
+    {
+        urls: 'turn:turn.cloudflare.com:5349?transport=tcp',
+        username: 'bc43ee30beac949e3717a1e3a6128089',
+        credential: '8b65f8ec9b8ca32b6ace1c09daf23baa9cc7955f8065b803b25332cdb460dfc8'
+    },
+    // 3. 终极穿墙方案: TURNS over TLS (端口 443, 伪装成 HTTPS)
+    // 这是最容易穿透防火墙的，但延迟稍微高一点点
+    {
+        urls: 'turns:turn.cloudflare.com:443?transport=tcp',
+        username: 'bc43ee30beac949e3717a1e3a6128089',
+        credential: '8b65f8ec9b8ca32b6ace1c09daf23baa9cc7955f8065b803b25332cdb460dfc8'
+    }
+];
 
 // Types for P2P Messages
 type PeerMessage = 
@@ -183,6 +200,7 @@ const App: React.FC = () => {
     dataChannelRef.current = dc;
     
     dc.onopen = () => {
+        console.log("🚀 数据通道竟然通了！"); // 看到这句话说明彻底成功
         setOnlineStatus('connected');
         setShowOnlineMenu(false);
         setShowMenu(false);
@@ -235,14 +253,14 @@ const App: React.FC = () => {
 
     const id = Math.floor(100000 + Math.random() * 900000).toString();
     setPeerId(id);
-
+    
     const pc = new RTCPeerConnection({
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             // 使用你刚才获取的 Cloudflare TURN
-            turnConfig 
+            ...turnConfig 
         ],
-        iceTransportPolicy: 'all', // 允许所有连接方式
+        iceTransportPolicy: 'relay', 
         bundlePolicy: 'max-bundle' // 优化连接
     });
     pcRef.current = pc;
@@ -299,9 +317,9 @@ const App: React.FC = () => {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             // 使用你刚才获取的 Cloudflare TURN
-            turnConfig
+            ...turnConfig
         ],
-        iceTransportPolicy: 'all',
+        iceTransportPolicy: 'relay',
         bundlePolicy: 'max-bundle'
     });
     pcRef.current = pc;
