@@ -260,7 +260,7 @@ const App: React.FC = () => {
             // 使用你刚才获取的 Cloudflare TURN
             ...turnConfig 
         ],
-        iceTransportPolicy: 'relay', 
+        iceTransportPolicy: 'all', 
         bundlePolicy: 'max-bundle' // 优化连接
     });
     pcRef.current = pc;
@@ -268,22 +268,37 @@ const App: React.FC = () => {
     const dc = pc.createDataChannel("game-channel");
     setupDataChannel(dc);
 
-    // --- Critical: Wait for ICE gathering to complete ---
-    pc.onicecandidate = async (event) => {
-        if (event.candidate === null) {
-            try {
-                // Only send offer when we have all candidates (Wait for null)
-                await fetch(`${WORKER_URL}/create-room`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ roomId: id, sdp: pc.localDescription })
-                });
-                startPolling(id);
-            } catch (e) {
-                console.error("Failed to upload Host SDP", e);
-            }
+        let isOfferSent = false; // 防止重复发送的标记
+
+    // 定义发送动作
+    const doSendOffer = async () => {
+        if (isOfferSent) return;
+        isOfferSent = true;
+        
+        try {
+            await fetch(`${WORKER_URL}/create-room`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ roomId: id, sdp: pc.localDescription })
+            });
+            startPolling(id);
+            console.log("SDP Offer 已发送");
+        } catch (e) {
+            console.error("发送失败", e);
         }
     };
+
+    // 监听候选者收集
+    pc.onicecandidate = (event) => {
+        // 如果收集完毕(null)，立即发送
+        if (event.candidate === null) {
+            doSendOffer();
+        }
+    };
+
+    // 【加速核心】: 设置 2秒 超时。如果 2秒 内没收集完，不再死等，强制发送。
+    setTimeout(doSendOffer, 2000);
+
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -313,37 +328,59 @@ const App: React.FC = () => {
     if (!remotePeerId) return;
     setOnlineStatus('connecting');
 
+    // 1. 创建 PC
     const pc = new RTCPeerConnection({
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            // 使用你刚才获取的 Cloudflare TURN
             ...turnConfig
         ],
-        iceTransportPolicy: 'relay',
+        iceTransportPolicy: 'all', // 确保是 all
         bundlePolicy: 'max-bundle'
     });
     pcRef.current = pc;
 
+    // 2. 绑定数据通道事件 (Guest 是被动接收通道，所以是用 ondatachannel)
     pc.ondatachannel = (event) => setupDataChannel(event.channel);
 
-    // --- Critical: Wait for ICE gathering to complete ---
-    pc.onicecandidate = async (event) => {
-        if (event.candidate === null) {
-             try {
-                // Send answer only when ICE is complete
-                await fetch(`${WORKER_URL}/join-room`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ roomId: remotePeerId, guestSdp: pc.localDescription })
-                });
-                setMyColor('white'); // Guest is white
-             } catch (e) {
-                 console.error("Failed to upload Guest SDP", e);
-             }
+    // --- 3. 核心修改：Guest 的发送逻辑 (Send Answer) ---
+    let isAnswerSent = false;
+
+    const doSendAnswer = async () => {
+        if (isAnswerSent) return;
+        isAnswerSent = true;
+        
+        try {
+            // 注意：这里是上传 Answer，接口通常是 /answer 或者 /submit-answer
+            // 参数应该是 roomId 和 sdp (此时是 Answer 类型)
+            await fetch(`${WORKER_URL}/answer`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ roomId: remotePeerId, sdp: pc.localDescription })
+            });
+            console.log("SDP Answer 已发送");
+        } catch (e) {
+            console.error("发送 Answer 失败", e);
         }
     };
 
+    // 4. ICE 收集监听
+    pc.onicecandidate = (event) => {
+        if (event.candidate === null) {
+            doSendAnswer(); // 收集完毕立即发送
+        }
+    };
+
+    // 5. 超时强制发送 (加速策略)
+    setTimeout(() => {
+        if (!isAnswerSent) {
+            console.log("ICE 收集超时，强制发送 Answer");
+            doSendAnswer();
+        }
+    }, 2000);
+
+    // --- 6. 获取 Host Offer 并生成 Answer ---
     try {
+        // 获取房间信息
         const res = await fetch(`${WORKER_URL}/join-room`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -357,10 +394,14 @@ const App: React.FC = () => {
         }
 
         const { hostSdp } = await res.json();
+        
+        // 设置远程描述 (Host Offer)
         await pc.setRemoteDescription(new RTCSessionDescription(hostSdp));
         
+        // 创建 Answer
         const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer); // This triggers ICE gathering
+        await pc.setLocalDescription(answer); // 这会触发 ICE 收集 -> 进而触发上面的 doSendAnswer
+        
     } catch (e) {
         console.error("Join Error", e);
         setOnlineStatus('disconnected');
