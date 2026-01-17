@@ -7,28 +7,6 @@ import { RotateCcw, Users, Cpu, Trophy, Settings, SkipForward, Play, Frown, Glob
 // --- Configuration ---
 const WORKER_URL = 'https://api.yesterhaze.codes';
 
-const turnConfig = [
-    // 1. 【改动】使用标准端口 3478 UDP (原来是 5349，容易被封)
-    {
-        urls: 'turn:turn.cloudflare.com:3478?transport=udp',
-        username: '3bb5ecca232b7084cba699da2a2786e8',
-        credential: 'ba05c592e0930be2ef64d5253744225627aadd7183f0198c3d34a13f5b0f23b1'
-    },
-    // 2. 【改动】使用标准端口 3478 TCP
-    {
-        urls: 'turn:turn.cloudflare.com:3478?transport=tcp',
-        username: '3bb5ecca232b7084cba699da2a2786e8',
-        credential: 'ba05c592e0930be2ef64d5253744225627aadd7183f0198c3d34a13f5b0f23b1'
-    },
-    // 3. 终极方案: TURNS over TLS (端口 443)
-    // 这个配置本身没问题，但必须确保它是作为备选方案存在
-    {
-        urls: 'turns:turn.cloudflare.com:443?transport=tcp',
-        username: '3bb5ecca232b7084cba699da2a2786e8',
-        credential: 'ba05c592e0930be2ef64d5253744225627aadd7183f0198c3d34a13f5b0f23b1'
-    }
-];
-
 // Types for P2P Messages
 type PeerMessage = 
   | { type: 'MOVE'; x: number; y: number }
@@ -247,23 +225,42 @@ const App: React.FC = () => {
     }
   };
 
-  const createRoom = async () => {
-    // Prevent duplicate init
-    if (pcRef.current && pcRef.current.signalingState !== 'closed') return;
+    const getIceServers = async () => {
+        try {
+            const res = await fetch(`${WORKER_URL}/ice-servers`, { method: 'POST' });
+            const data = await res.json();
+            if (data && data.iceServers) {
+                return data.iceServers;
+            }
+        } catch (e) {
+            console.error("无法获取 TURN 服务器, 将仅使用 Google STUN", e);
+        }
+        return []; // 失败时返回空，回退到仅使用 STUN
+    };
 
-    const id = Math.floor(100000 + Math.random() * 900000).toString();
-    setPeerId(id);
+    // --- Modified createRoom ---
+    const createRoom = async () => {
+        if (pcRef.current && pcRef.current.signalingState !== 'closed') return;
+
+        // 1. 动态获取 ICE Servers
+        const turnServers = await getIceServers();
     
-    const pc = new RTCPeerConnection({
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            // 使用你刚才获取的 Cloudflare TURN
-            ...turnConfig 
-        ],
-        iceTransportPolicy: 'all', 
-        bundlePolicy: 'max-bundle' // 优化连接
-    });
-    pcRef.current = pc;
+        const id = Math.floor(100000 + Math.random() * 900000).toString();
+        setPeerId(id);
+    
+        // 2. 使用获取到的配置初始化
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }, // 免费 STUN 作为保底
+                ...turnServers // Cloudflare 返回的动态 TURN 列表 (包含 UDP/TCP/TLS)
+            ],
+            iceTransportPolicy: 'all', 
+            bundlePolicy: 'max-bundle'
+        });
+        pcRef.current = pc;
+
+    const dc = pc.createDataChannel("game-channel");
+    setupDataChannel(dc);
 
     pc.oniceconnectionstatechange = () => {
         console.log("🧊 Host ICE 状态:", pc.iceConnectionState);
@@ -372,73 +369,70 @@ const App: React.FC = () => {
     }, 3000);
   };
 
-  const joinRoom = async () => {
-    if (!remotePeerId) return;
-    setOnlineStatus('connecting');
+    const joinRoom = async () => {
+        if (!remotePeerId) return;
+        setOnlineStatus('connecting');
 
-    // 1. 创建 PC
-    const pc = new RTCPeerConnection({
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            ...turnConfig
-        ],
-        iceTransportPolicy: 'all', // 确保是 all
-        bundlePolicy: 'max-bundle'
-    });
-    pcRef.current = pc;
+        // 1. 动态获取 ICE Servers
+        const turnServers = await getIceServers();
 
-    pc.oniceconnectionstatechange = () => {
-        console.log("🧊 Host ICE 状态:", pc.iceConnectionState);
-        // 如果变成 "disconnected" 或 "failed"，说明防火墙还是拦住了
-        // 如果是 "connected" 或 "completed"，说明打洞成功！
-    };
+        // 2. 使用获取到的配置初始化
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                ...turnServers
+            ],
+            iceTransportPolicy: 'all',
+            bundlePolicy: 'max-bundle'
+        });
+        pcRef.current = pc;
 
-    pc.onconnectionstatechange = () => {
-        console.log("🤝 Host 连接状态:", pc.connectionState);
-    };
+        pc.ondatachannel = (event) => setupDataChannel(event.channel);
 
-    // 2. 绑定数据通道事件 (Guest 是被动接收通道，所以是用 ondatachannel)
-    pc.ondatachannel = (event) => setupDataChannel(event.channel);
-
-    // --- 3. 核心修改：Guest 的发送逻辑 (Send Answer) ---
-    let isAnswerSent = false;
-
-    const doSendAnswer = async () => {
-        if (isAnswerSent) return;
-        isAnswerSent = true;
+        // --- 核心修复开始 ---
         
-        try {
-            // 注意：这里是上传 Answer，接口通常是 /answer 或者 /submit-answer
-            // 参数应该是 roomId 和 sdp (此时是 Answer 类型)
-            await fetch(`${WORKER_URL}/answer`, { 
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ roomId: remotePeerId, sdp: pc.localDescription })
-            });
-            console.log("SDP Answer 已发送");
-        } catch (e) {
-            console.error("发送 Answer 失败", e);
-        }
-    };
+        // 1. 定义发送 Answer 的逻辑 (等待 ICE 收集完成后触发)
+        let isAnswerSent = false;
+        const doSendAnswer = async () => {
+            if (isAnswerSent || !pc.localDescription) return;
+            isAnswerSent = true;
+            
+            try {
+                console.log("正在上传 Guest SDP (Answer)...");
+                // 【关键】这里必须调用 /answer 接口，而不是 /create-room
+                const res = await fetch(`${WORKER_URL}/answer`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        roomId: remotePeerId, 
+                        sdp: pc.localDescription // 包含 Answer SDP + ICE 候选
+                    })
+                });
+                
+                if (res.ok) {
+                    console.log("Guest SDP 上传成功，等待连接...");
+                    // 此时房主的轮询应该能读到 guestSdp 了，连接即将建立
+                } else {
+                    console.error("Answer 上传失败", await res.text());
+                }
+            } catch (e) {
+                console.error("发送 Answer 网络错误", e);
+            }
+        };
 
-    // 4. ICE 收集监听
+    // 2. 监听 ICE 候选收集
     pc.onicecandidate = (event) => {
         if (event.candidate === null) {
-            doSendAnswer(); // 收集完毕立即发送
+            // 收集完毕，发送完整 SDP
+            doSendAnswer();
         }
     };
 
-    // 5. 超时强制发送 (加速策略)
-    setTimeout(() => {
-        if (!isAnswerSent) {
-            console.log("ICE 收集超时，强制发送 Answer");
-            doSendAnswer();
-        }
-    }, 2000);
+    // 3. 超时强制发送 (防止某些网络下 ICE 收集永远不返回 null)
+    setTimeout(doSendAnswer, 2000);
 
-    // --- 6. 获取 Host Offer 并生成 Answer ---
     try {
-        // 获取房间信息
+        // 4. 获取房主的 Offer
         const res = await fetch(`${WORKER_URL}/join-room`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -452,20 +446,22 @@ const App: React.FC = () => {
         }
 
         const { hostSdp } = await res.json();
-        
-        // 设置远程描述 (Host Offer)
+        console.log("获取到 Host SDP");
+
+        // 5. 设置远程描述
         await pc.setRemoteDescription(new RTCSessionDescription(hostSdp));
         
-        // 创建 Answer
+        // 6. 生成 Answer
         const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer); // 这会触发 ICE 收集 -> 进而触发上面的 doSendAnswer
-        
+        await pc.setLocalDescription(answer); 
+        // setLocalDescription 后会触发 onicecandidate，最终触发 doSendAnswer
+
     } catch (e) {
         console.error("Join Error", e);
         setOnlineStatus('disconnected');
         alert("加入失败，请检查网络或房间号");
     }
-  };
+};
 
   const copyId = () => {
       navigator.clipboard.writeText(peerId);
