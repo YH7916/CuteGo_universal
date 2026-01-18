@@ -400,7 +400,7 @@ export const getAIMove = (
   gameType: 'Go' | 'Gomoku',
   difficulty: Difficulty,
   previousBoardHash: string | null
-): Point | null => {
+): Point | null | 'RESIGN' => {
   const size = board.length;
   const validMoves: Point[] = [];
   for (let y = 0; y < size; y++) {
@@ -472,6 +472,28 @@ export const getAIMove = (
   }
 
   // --- GO AI ---
+  
+  // Resignation Check for Hard/Medium
+  if (difficulty !== 'Easy') {
+       // Estimate game progress by stone count
+       let occupiedCount = 0;
+       for(let y=0; y<size; y++) for(let x=0; x<size; x++) if(board[y][x]) occupiedCount++;
+       
+       // Only check for resignation if game is > 40% developed to avoid early surrender
+       if (occupiedCount > (size * size) * 0.4) {
+           const score = calculateScore(board);
+           const aiScore = player === 'black' ? score.black : score.white;
+           const opponentScore = player === 'black' ? score.white : score.black;
+           const scoreDiff = aiScore - opponentScore;
+           
+           // If AI is behind by 30 points (considering our scoring algo is simple, 30 is a safe margin)
+           // and it's Hard mode (AI recognizes defeat), it resigns.
+           if (scoreDiff < -30) {
+               return 'RESIGN';
+           }
+       }
+  }
+
   // Easy: Random valid moves (avoids suicide/eyes)
   if (difficulty === 'Easy') {
     const safeMoves = validMoves.filter(m => {

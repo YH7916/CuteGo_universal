@@ -251,8 +251,17 @@ const App: React.FC = () => {
       const timer = setTimeout(() => {
         let prevHash = null; if (history.length > 0) prevHash = getBoardHash(history[history.length-1].board);
         const move = getAIMove(board, aiColor, gameType, difficulty, prevHash);
-        if (move) executeMove(move.x, move.y, false); else handlePass();
-        setIsThinking(false);
+        
+        if (move === 'RESIGN') {
+             setIsThinking(false);
+             endGame(userColor, 'AI 认为差距过大，投子认输');
+        } else if (move) {
+             executeMove(move.x, move.y, false);
+             setIsThinking(false);
+        } else {
+             handlePass();
+             setIsThinking(false);
+        }
       }, 700);
       return () => clearTimeout(timer);
     }
