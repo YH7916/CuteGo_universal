@@ -9,7 +9,7 @@ import { createClient } from '@supabase/supabase-js';
 
 // --- 2. 配置 Supabase (使用你提供的信息) ---
 const SUPABASE_URL = 'https://ibtgczhypjybiibtapcn.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_JapcRCoxrlIwk8_EKPrDoQ_QKZ_J7WU'; 
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlidGdjemh5cGp5YmlpYnRhcGNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTExMDIsImV4cCI6MjA4NDIyNzEwMn0.duXCEXmxLSppLlw0q-9JoFD7EpIBUw6fc1zmDiRwTPU'; 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // --- 3. 定义信令消息类型 ---
@@ -218,94 +218,126 @@ const App: React.FC = () => {
     }
   };
 
-  // 3. 统一初始化 WebRTC 连接
-  const setupPeerConnection = async (roomId: string, isHost: boolean) => {
-    console.log(`[WebRTC] 初始化 PeerConnection... (Host: ${isHost})`);
-    
-    // 清理旧连接
-    if (pcRef.current) pcRef.current.close();
-
-    const iceServers = await getIceServers();
-    const pc = new RTCPeerConnection({
-        iceServers,
-        iceTransportPolicy: 'all',
-        bundlePolicy: 'max-bundle'
-    });
-    pcRef.current = pc;
-
-    // ICE 候选处理 (Trickle ICE) - 关键加速点
-    pc.onicecandidate = (event) => {
-        if (event.candidate) {
-            console.log("[WebRTC] 发现 ICE 候选者，立即发送...");
-            sendSignal(roomId, { type: 'ice', candidate: event.candidate.toJSON() });
-        }
-    };
-
-    pc.oniceconnectionstatechange = () => {
-        console.log(`[WebRTC] 连接状态变更: ${pc.iceConnectionState}`);
-        if (pc.iceConnectionState === 'connected') {
-            setOnlineStatus('connected');
-        } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-            setOnlineStatus('disconnected');
-            alert("连接断开");
-        }
-    };
-
-    // 设置数据通道
-    if (isHost) {
-        // 房主创建通道
-        console.log("[WebRTC] 创建 DataChannel...");
-        const dc = pc.createDataChannel("game-channel");
-        setupDataChannel(dc, true);
-    } else {
-        // 客人监听通道
-        pc.ondatachannel = (event) => {
-            console.log("[WebRTC] 收到 DataChannel...");
-            setupDataChannel(event.channel, false);
-        };
-    }
-
-    return pc;
-  };
-
-  // 4. 数据通道逻辑 (处理游戏消息)
-  const setupDataChannel = (dc: RTCDataChannel, isHost: boolean) => {
-    dataChannelRef.current = dc;
-    dc.onopen = () => {
-        console.log("[DataChannel] 通道已打开！");
-        setOnlineStatus('connected');
-        setShowOnlineMenu(false);
-        setShowMenu(false);
-        setGameMode('PvP');
+  // 找到原本的 setupPeerConnection，替换为：
+    const setupPeerConnection = async (roomId: string, isHost: boolean) => {
+        console.log(`%c[WebRTC] 初始化 PeerConnection (Host: ${isHost})`, 'color: #00ff00; font-weight: bold;');
         
-        if (isHost) {
-             setMyColor('black');
-             resetGame(true);
-             // 同步初始状态
-             if (dc.readyState === 'open') {
-                 dc.send(JSON.stringify({ 
-                     type: 'SYNC', 
-                     boardSize: boardSize, 
-                     gameType: gameTypeRef.current, 
-                     startColor: 'white' 
-                 }));
-             }
+        if (pcRef.current) {
+            console.log(`[WebRTC] 清理旧连接...`);
+            pcRef.current.close();
         }
+
+        const iceServers = await getIceServers();
+        console.log(`[WebRTC] 使用 ICE Servers:`, iceServers);
+
+        const pc = new RTCPeerConnection({
+            iceServers,
+            iceTransportPolicy: 'all',
+            bundlePolicy: 'max-bundle'
+        });
+        pcRef.current = pc;
+
+        // --- 调试：监听连接状态变化 ---
+        pc.onconnectionstatechange = () => {
+            console.log(`%c[WebRTC] 🔄 Connection State: ${pc.connectionState}`, 'color: orange');
+            if (pc.connectionState === 'failed') {
+                console.error('[WebRTC] 连接失败，请检查防火墙或 STUN/TURN 服务器');
+            }
+        };
+
+        pc.onsignalingstatechange = () => {
+            console.log(`[WebRTC] 🚦 Signaling State: ${pc.signalingState}`);
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            console.log(`[WebRTC] 🧊 ICE Connection State: ${pc.iceConnectionState}`);
+            if (pc.iceConnectionState === 'connected') {
+                console.log(`%c[WebRTC] ✅ P2P 连接建立成功!`, 'color: #00ff00; font-weight: bold; font-size: 14px;');
+                setOnlineStatus('connected');
+            } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                setOnlineStatus('disconnected');
+                console.warn("[WebRTC] ICE 连接断开/失败");
+            }
+        };
+
+        // --- 调试：打印具体的 ICE 候选 ---
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                console.log(`[WebRTC] 🧊 收集到 ICE 候选: ${event.candidate.type} - ${event.candidate.protocol} ${event.candidate.address}:${event.candidate.port}`);
+                sendSignal(roomId, { type: 'ice', candidate: event.candidate.toJSON() });
+            } else {
+                console.log(`[WebRTC] 🧊 ICE 候选收集完成 (End of Candidates)`);
+            }
+        };
+
+        if (isHost) {
+            console.log("[WebRTC] (Host) 创建 DataChannel 'game-channel'...");
+            const dc = pc.createDataChannel("game-channel");
+            setupDataChannel(dc, true);
+        } else {
+            pc.ondatachannel = (event) => {
+                console.log(`[WebRTC] (Guest) 收到 DataChannel: ${event.channel.label}`);
+                setupDataChannel(event.channel, false);
+            };
+        }
+
+        return pc;
     };
-    dc.onmessage = (e) => {
-        // console.log("[DataChannel] 收到消息:", e.data); // 消息太频繁可以注释掉
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'MOVE') executeMove(msg.x, msg.y, true);
-        else if (msg.type === 'PASS') handlePass(true);
-        else if (msg.type === 'SYNC') { setBoardSize(msg.boardSize); setGameType(msg.gameType); setMyColor(msg.startColor); resetGame(true); }
-        else if (msg.type === 'RESTART') resetGame(true);
+  // 4. 数据通道逻辑 (处理游戏消息)
+    const setupDataChannel = (dc: RTCDataChannel, isHost: boolean) => {
+        dataChannelRef.current = dc;
+        
+        dc.onopen = () => {
+            console.log(`%c[DataChannel] ✅ 通道已打开 (ReadyState: ${dc.readyState})`, 'color: cyan; font-weight: bold;');
+            setOnlineStatus('connected');
+            setShowOnlineMenu(false);
+            setShowMenu(false);
+            setGameMode('PvP');
+            
+            if (isHost) {
+                console.log(`[DataChannel] Host 发送 SYNC 初始状态...`);
+                setMyColor('black');
+                resetGame(true);
+                if (dc.readyState === 'open') {
+                    dc.send(JSON.stringify({ 
+                        type: 'SYNC', 
+                        boardSize: boardSize, 
+                        gameType: gameTypeRef.current, 
+                        startColor: 'white' 
+                    }));
+                }
+            }
+        };
+
+        dc.onmessage = (e) => {
+            const msg = JSON.parse(e.data);
+            console.log(`[DataChannel] 📩 收到消息:`, msg.type, msg); // 调试输出收到的指令
+            
+            if (msg.type === 'MOVE') executeMove(msg.x, msg.y, true);
+            else if (msg.type === 'PASS') handlePass(true);
+            else if (msg.type === 'SYNC') { 
+                console.log(`[DataChannel] 执行 SYNC 同步`);
+                setBoardSize(msg.boardSize); 
+                setGameType(msg.gameType); 
+                setMyColor(msg.startColor); 
+                resetGame(true); 
+            }
+            else if (msg.type === 'RESTART') {
+                console.log(`[DataChannel] 对手请求重置`);
+                resetGame(true);
+            }
+        };
+
+        dc.onerror = (error) => {
+            console.error(`[DataChannel] ❌ 发生错误:`, error);
+        };
+
+        dc.onclose = () => { 
+            console.log("[DataChannel] ⚠️ 通道关闭");
+            setOnlineStatus('disconnected'); 
+            setMyColor(null); 
+        };
     };
-    dc.onclose = () => { 
-        console.log("[DataChannel] 通道关闭");
-        setOnlineStatus('disconnected'); 
-        setMyColor(null); 
-    };
-  };
 
   // 清理函数
   const cleanupOnline = () => {
@@ -358,10 +390,11 @@ const App: React.FC = () => {
                 await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
             }
         })
-        .subscribe((status) => {
-            console.log(`[Supabase] 订阅状态: ${status}`);
+        .subscribe((status, err) => {
             if (status === 'SUBSCRIBED') {
-                // 订阅成功，等待客人
+                console.log(`%c[Supabase] ✅ 成功订阅频道 room_${id}，等待客人...`, 'color: yellow');
+            } else {
+                console.error(`[Supabase] ❌ 订阅状态: ${status}`, err);
             }
         });
   };
@@ -400,18 +433,23 @@ const App: React.FC = () => {
                 }
             }
         })
-        .subscribe(async (status) => {
-            console.log(`[Supabase] 订阅状态: ${status}`);
+        .subscribe(async (status, err) => {
             if (status === 'SUBSCRIBED') {
-                // 订阅成功 -> 喊话房主
-                console.log("[流程] 订阅成功，发送 join 信号...");
-                // 预先初始化 PC 以便接收 Offer
+                console.log(`%c[Supabase] ✅ 成功订阅频道 room_${remotePeerId}，发送 JOIN 信号...`, 'color: yellow');
                 await setupPeerConnection(remotePeerId, false);
                 await sendSignal(remotePeerId, { type: 'join' });
+            } else {
+                console.error(`[Supabase] ❌ 订阅状态: ${status}`, err);
             }
         });
   };
-
+    useEffect(() => {
+        // 当联机菜单打开(showOnlineMenu)，且没有房间号(peerId)，且状态是断开时
+        // 自动触发创建房间
+        if (showOnlineMenu && !peerId && onlineStatus === 'disconnected') {
+            createRoom();
+        }
+    }, [showOnlineMenu, peerId, onlineStatus]);
   // ----------------------------------------------------------------
   // --- 网络逻辑重构结束 ---
   // ----------------------------------------------------------------
