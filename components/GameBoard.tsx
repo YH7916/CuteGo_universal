@@ -25,6 +25,15 @@ interface Connection {
   type: ConnectionType;
 }
 
+// 定义气流线段结构
+interface QiSegment {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    key: string;
+}
+
 export const GameBoard: React.FC<GameBoardProps> = ({ 
   board, 
   onIntersectionClick, 
@@ -56,9 +65,18 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     blockClick: false
   });
 
+  // --- ACTIVE QI STATE ---
+  const [activeQiSegments, setActiveQiSegments] = useState<QiSegment[]>([]);
+
   useEffect(() => {
     setTransform({ scale: 1, x: 0, y: 0 });
+    setActiveQiSegments([]); // 重置棋盘大小时清除气流
   }, [boardSize, showCoordinates]);
+
+  // 当棋盘变化（落子）时，清除之前的气流显示
+  useEffect(() => {
+    setActiveQiSegments([]);
+  }, [board]);
 
   const handleTouchStart = (e: React.TouchEvent) => {
     if (e.touches.length === 1) {
@@ -103,8 +121,98 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     }
   };
 
+  // --- SHOW QI LOGIC ---
+  const calculateQiFlow = (x: number, y: number) => {
+      const targetStone = board[y][x];
+      if (!targetStone) return [];
+
+      // 简单的泛洪算法找到整个棋块 (Group)
+      const groupStones: {x: number, y: number}[] = [];
+      const visited = new Set<string>();
+      const stack = [{x, y}];
+      const color = targetStone.color;
+
+      visited.add(`${x},${y}`);
+
+      while(stack.length > 0) {
+          const curr = stack.pop()!;
+          groupStones.push(curr);
+
+          const dirs = [[1,0], [-1,0], [0,1], [0,-1]];
+          dirs.forEach(([dx, dy]) => {
+              const nx = curr.x + dx;
+              const ny = curr.y + dy;
+              if (nx >= 0 && nx < boardSize && ny >= 0 && ny < boardSize) {
+                  const key = `${nx},${ny}`;
+                  if (!visited.has(key)) {
+                      const neighbor = board[ny][nx];
+                      if (neighbor && neighbor.color === color) {
+                          visited.add(key);
+                          stack.push({x: nx, y: ny});
+                      }
+                  }
+              }
+          });
+      }
+
+      // 计算该棋块所有的气（连接到空位的线段）
+      const segments: QiSegment[] = [];
+      groupStones.forEach(stone => {
+          const dirs = [[1,0], [-1,0], [0,1], [0,-1]];
+          dirs.forEach(([dx, dy]) => {
+              const nx = stone.x + dx;
+              const ny = stone.y + dy;
+              if (nx >= 0 && nx < boardSize && ny >= 0 && ny < boardSize) {
+                  // 如果邻居是空的，这就是一口气
+                  if (!board[ny][nx]) {
+                      segments.push({
+                          x1: stone.x,
+                          y1: stone.y,
+                          x2: nx,
+                          y2: ny,
+                          key: `qi-${stone.x},${stone.y}-${nx},${ny}`
+                      });
+                  }
+              }
+          });
+      });
+      return segments;
+  };
+
+  const handleStoneHover = (x: number, y: number) => {
+    if (!showQi) {
+        if (activeQiSegments.length > 0) setActiveQiSegments([]);
+        return;
+    }
+    // 如果悬停的是空位，且当前有显示气流，则清空（桌面体验优化）
+    if (!board[y][x]) {
+        // setActiveQiSegments([]); // 可选：如果希望移开鼠标就消失，可以取消注释
+        return;
+    }
+    setActiveQiSegments(calculateQiFlow(x, y));
+  };
+
+  const handleMouseLeaveBoard = () => {
+      setActiveQiSegments([]);
+  };
+
+  // 统一处理点击：如果是空位则落子，如果是棋子则显示气（移动端友好）
   const handleIntersectionClickWrapper = (x: number, y: number) => {
     if (touchState.current.blockClick) return;
+    
+    // 逻辑分支：
+    // 1. 如果该位置有子，且开启了显示气功能 -> 切换显示该子的气
+    if (board[y][x] && showQi) {
+        const segments = calculateQiFlow(x, y);
+        // 如果点击的是当前已经高亮的棋子，可以做toggle，或者刷新
+        setActiveQiSegments(segments);
+        // 手机震动反馈
+        if (navigator.vibrate) navigator.vibrate(10);
+        return;
+    }
+
+    // 2. 如果该位置无子 -> 落子，并自动清除当前的气流显示
+    setActiveQiSegments([]); 
     onIntersectionClick(x, y);
   };
 
@@ -114,26 +222,28 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     const isValid = (cx: number, cy: number) => cx >= 0 && cx < boardSize && cy >= 0 && cy < boardSize;
 
     if (gameType === 'Gomoku') {
+        const addGomokuLink = (x: number, y: number, dx: number, dy: number) => {
+            const tx = x + dx;
+            const ty = y + dy;
+            if (!isValid(tx, ty)) return;
+
+            const stone = board[y][x];
+            const target = board[ty][tx];
+            if (!stone || !target || target.color !== stone.color) return;
+
+            lines.push({ x1: x, y1: y, x2: tx, y2: ty, color: stone.color, type: 'loose' });
+        };
+
         for(let y=0; y<boardSize; y++) {
           for(let x=0; x<boardSize; x++) {
             const stone = board[y][x];
             if(!stone) continue;
-            // Check Right (1, 0)
-            if(isValid(x+1, y) && board[y][x+1]?.color === stone.color) {
-               lines.push({ x1: x, y1: y, x2: x+1, y2: y, color: stone.color, type: 'ortho' });
-            }
-            // Check Down (0, 1)
-            if(isValid(x, y+1) && board[y+1][x]?.color === stone.color) {
-               lines.push({ x1: x, y1: y, x2: x, y2: y+1, color: stone.color, type: 'ortho' });
-            }
-            // Check Diagonal Down-Right (1, 1)
-            if(isValid(x+1, y+1) && board[y+1][x+1]?.color === stone.color) {
-               lines.push({ x1: x, y1: y, x2: x+1, y2: y+1, color: stone.color, type: 'ortho' });
-            }
-            // Check Diagonal Down-Left (-1, 1)
-             if(isValid(x-1, y+1) && board[y+1][x-1]?.color === stone.color) {
-               lines.push({ x1: x, y1: y, x2: x-1, y2: y+1, color: stone.color, type: 'ortho' });
-            }
+
+            // 上下左右 + 斜对角，使用围棋同款牵丝效果
+            addGomokuLink(x, y, 1, 0);
+            addGomokuLink(x, y, 0, 1);
+            addGomokuLink(x, y, 1, 1);
+            addGomokuLink(x, y, -1, 1);
           }
         }
     } else {
@@ -171,8 +281,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                 const minY = Math.min(y, ty);
                 const maxY = Math.max(y, ty);
 
+                // 1. 检查是否有己方棋子连通 (Has Bridge)
                 let hasBridge = false;
-                
                 for (let by = minY; by <= maxY; by++) {
                     for (let bx = minX; bx <= maxX; bx++) {
                         if ((bx === x && by === y) || (bx === tx && by === ty)) continue;
@@ -185,11 +295,30 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                     if (hasBridge) break;
                 }
 
+                // 2. 检查是否被对手切断 (Is Cut)
                 let isCut = false;
+                
+                // 情况 A: 象步/小尖 (Kosumi, 对角线 1,1)
+                // 只有当两个“象眼”都被堵住时，才算彻底切断视觉联系
                 if (Math.abs(dx) === 1 && Math.abs(dy) === 1) {
                      const s1 = board[y][tx]; 
                      const s2 = board[ty][x]; 
                      if (s1?.color === opColor && s2?.color === opColor) isCut = true;
+                } 
+                // 情况 B: 跳/飞 (Jump/Knight's Move)
+                // 只要路径矩形范围内有任何一颗对手棋子，就视为阻断了“牵丝”
+                else {
+                    for (let by = minY; by <= maxY; by++) {
+                        for (let bx = minX; bx <= maxX; bx++) {
+                            if ((bx === x && by === y) || (bx === tx && by === ty)) continue;
+                            const midStone = board[by][bx];
+                            if (midStone && midStone.color === opColor) {
+                                isCut = true;
+                                break;
+                            }
+                        }
+                        if (isCut) break;
+                    }
                 }
 
                 if (!hasBridge && !isCut) {
@@ -220,6 +349,18 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   }, [board]);
 
   const groupFaces = useMemo(() => {
+    if (gameType === 'Gomoku') {
+        return stones.map(stone => ({
+            id: stone.id,
+            x: stone.x,
+            y: stone.y,
+            mood: 'happy' as const,
+            color: stone.color,
+            scale: 1,
+            lookOffset: { x: 0, y: 0 }
+        }));
+    }
+
     const groups = getAllGroups(board);
     return groups.map(group => {
         let sumX = 0;
@@ -271,16 +412,31 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             finalY = closestStone.y;
         }
 
-        let mood: 'happy' | 'neutral' | 'worried' = 'happy';
-        
-        if (gameType === 'Go') {
-             if (group.liberties === 1) mood = 'worried';
-             else if (group.liberties <= 3) mood = 'neutral';
-        } else {
-            if (count >= 4) mood = 'happy';
-            else if (count === 3) mood = 'neutral';
-            else mood = 'happy'; 
+        // --- FACE DIRECTION LOGIC ---
+        let lookOffset = { x: 0, y: 0 };
+        if (group.libertyPoints && group.libertyPoints.length > 0) {
+            let lx = 0;
+            let ly = 0;
+            group.libertyPoints.forEach(p => {
+                lx += p.x;
+                ly += p.y;
+            });
+            lx /= group.libertyPoints.length;
+            ly /= group.libertyPoints.length;
+            
+            // Calculate vector from Face Position to Center of Liberties
+            const dx = lx - finalX;
+            const dy = ly - finalY;
+            const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+            
+            // Normalize
+            lookOffset = { x: dx / dist, y: dy / dist };
         }
+        // ---------------------------
+
+        let mood: 'happy' | 'neutral' | 'worried' = 'happy';
+        if (group.liberties === 1) mood = 'worried';
+        else if (group.liberties <= 3) mood = 'neutral';
 
         const sizeBonus = Math.min(count - 1, 3) * 0.1;
 
@@ -290,10 +446,11 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             y: finalY,
             mood,
             color: group.stones[0].color,
-            scale: 1 + sizeBonus
+            scale: 1 + sizeBonus,
+            lookOffset
         };
     });
-  }, [board, gameType]);
+  }, [board, gameType, stones]);
 
   const renderGridLines = () => {
     const lines = [];
@@ -397,6 +554,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             fill="transparent"
             className="cursor-pointer hover:fill-black/5 transition-colors"
             onClick={() => handleIntersectionClickWrapper(x, y)}
+            onMouseEnter={() => handleStoneHover(x, y)}
           />
         );
       }
@@ -404,87 +562,148 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     return hits;
   };
 
-  const renderQiLayer = () => {
-      if (!showQi) return null;
+  // 渲染流动的气特效
+  const renderQiFlow = () => {
+      if (!showQi || activeQiSegments.length === 0) return null;
+      
       return (
-        <g className="animate-pulse-slow">
-            {stones.map(s => {
-                const cx = GRID_PADDING + s.x * CELL_SIZE;
-                const cy = GRID_PADDING + s.y * CELL_SIZE;
-                const isBlack = s.color === 'black';
-                const fillColor = isBlack ? '#4a148c' : '#e0f7fa';
-                const opacity = isBlack ? 0.35 : 0.5;
-
-                return (
-                    <circle
-                        key={`qi-${s.id}`}
-                        cx={cx}
-                        cy={cy}
-                        r={CELL_SIZE * 0.8}
-                        fill={fillColor}
-                        opacity={opacity}
-                        filter="url(#qi-blur)"
-                    />
-                )
-            })}
-        </g>
-      )
+          <g filter="url(#glow-flow)">
+              {/* 底层高亮线 (背景) */}
+              {activeQiSegments.map(seg => (
+                  <line 
+                    key={`${seg.key}-bg`}
+                    x1={GRID_PADDING + seg.x1 * CELL_SIZE}
+                    y1={GRID_PADDING + seg.y1 * CELL_SIZE}
+                    x2={GRID_PADDING + seg.x2 * CELL_SIZE}
+                    y2={GRID_PADDING + seg.y2 * CELL_SIZE}
+                    stroke="#4fc3f7"
+                    strokeWidth={boardSize > 13 ? 3 : 5}
+                    strokeLinecap="round"
+                    opacity="0.5"
+                  />
+              ))}
+              
+              {/* 上层流动动画线 */}
+              {activeQiSegments.map(seg => (
+                  <line 
+                    key={seg.key}
+                    x1={GRID_PADDING + seg.x1 * CELL_SIZE}
+                    y1={GRID_PADDING + seg.y1 * CELL_SIZE}
+                    x2={GRID_PADDING + seg.x2 * CELL_SIZE}
+                    y2={GRID_PADDING + seg.y2 * CELL_SIZE}
+                    stroke="url(#qi-gradient)"
+                    strokeWidth={boardSize > 13 ? 2 : 3}
+                    strokeLinecap="round"
+                    className="animate-dash-flow"
+                  />
+              ))}
+              
+              {/* 末端的气点 (空位上的呼吸光点) */}
+              {activeQiSegments.map(seg => (
+                  <circle 
+                    key={`${seg.key}-dot`}
+                    cx={GRID_PADDING + seg.x2 * CELL_SIZE}
+                    cy={GRID_PADDING + seg.y2 * CELL_SIZE}
+                    r={boardSize > 13 ? 3 : 4}
+                    fill="#e1f5fe"
+                    className="animate-pulse"
+                  />
+              ))}
+          </g>
+      );
   };
 
-  const renderSolidBody = (color: Player) => {
-    const baseColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
-    const filterId = color === 'black' ? 'url(#jelly-black)' : 'url(#jelly-white)';
+    const renderSolidBody = (color: Player) => {
+        const baseColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
+        const isGomoku = gameType === 'Gomoku';
+        const filterId = color === 'black' ? 'url(#jelly-black)' : 'url(#jelly-white)';
     
-    const orthoWidth = gameType === 'Gomoku' ? CELL_SIZE * 0.2 : CELL_SIZE * 0.95;
-    const isGomoku = gameType === 'Gomoku';
+        const orthoWidth = gameType === 'Gomoku' ? CELL_SIZE * 0.2 : CELL_SIZE * 0.95;
 
-    return (
-        <g filter={filterId}>
-           <g className={isGomoku ? "animate-liquid-flow-gomoku" : ""}>
-             {connections.filter(c => c.color === color && c.type === 'ortho').map((c, i) => (
-                  <line 
-                      key={`${color}-body-ortho-${i}`}
-                      x1={GRID_PADDING + c.x1 * CELL_SIZE}
-                      y1={GRID_PADDING + c.y1 * CELL_SIZE}
-                      x2={GRID_PADDING + c.x2 * CELL_SIZE}
-                      y2={GRID_PADDING + c.y2 * CELL_SIZE}
-                      stroke={baseColor}
-                      strokeWidth={orthoWidth}
-                      strokeLinecap="round"
-                  />
-             ))}
-           </g>
-           {stones.filter(s => s.color === color).map(s => (
-            <circle
-              key={`${color}-body-base-${s.id}`}
-              cx={GRID_PADDING + s.x * CELL_SIZE}
-              cy={GRID_PADDING + s.y * CELL_SIZE}
-              r={STONE_RADIUS}
-              fill={baseColor}
-              className="stone-enter"
-            />
-          ))}
+        return (
+                <g filter={isGomoku ? undefined : filterId}>
+           {!isGomoku && (
+             <g>
+               {connections.filter(c => c.color === color && c.type === 'ortho').map((c, i) => (
+                    <line 
+                        key={`${color}-body-ortho-${i}`}
+                        x1={GRID_PADDING + c.x1 * CELL_SIZE}
+                        y1={GRID_PADDING + c.y1 * CELL_SIZE}
+                        x2={GRID_PADDING + c.x2 * CELL_SIZE}
+                        y2={GRID_PADDING + c.y2 * CELL_SIZE}
+                        stroke={baseColor}
+                        strokeWidth={orthoWidth}
+                        strokeLinecap="round"
+                    />
+               ))}
+             </g>
+           )}
+                     {stones.filter(s => s.color === color).map(s => (
+                        <circle
+                            key={`${color}-body-base-${s.id}`}
+                            cx={GRID_PADDING + s.x * CELL_SIZE}
+                            cy={GRID_PADDING + s.y * CELL_SIZE}
+                            r={STONE_RADIUS}
+                            fill={baseColor}
+                            filter={isGomoku ? filterId : undefined}
+                            className="stone-enter"
+                        />
+                    ))}
         </g>
     );
   };
 
-  const renderLooseSilk = (color: Player) => {
-    const baseColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
+    const renderLooseSilk = (color: Player) => {
+        const baseColor = color === 'black' ? '#2a2a2a' : '#f0f0f0';
+        const isGomoku = gameType === 'Gomoku';
+        const trim = isGomoku ? STONE_RADIUS * 0.7 : 0;
+        const filterId = isGomoku ? 'url(#goo-silk-gomoku)' : 'url(#goo-silk)';
+        const groupClass = isGomoku ? 'animate-liquid-flow-gomoku' : 'animate-liquid-flow';
+        const opacity = isGomoku ? 0.4 : 0.65;
     
-    return (
-        <g opacity="0.65" filter="url(#goo-silk)">
-           <g className="animate-liquid-flow">
-             {connections.filter(c => c.color === color && c.type === 'loose').map((c, i) => (
-                  <line 
-                      key={`${color}-loose-${i}`}
-                      x1={GRID_PADDING + c.x1 * CELL_SIZE}
-                      y1={GRID_PADDING + c.y1 * CELL_SIZE}
-                      x2={GRID_PADDING + c.x2 * CELL_SIZE}
-                      y2={GRID_PADDING + c.y2 * CELL_SIZE}
-                      stroke={baseColor}
-                      strokeLinecap="round"
-                  />
-             ))}
+        return (
+                <g opacity={opacity} filter={filterId}>
+                     <g className={groupClass}>
+                         {connections.filter(c => c.color === color && c.type === 'loose').map((c, i) => {
+                  const x1 = GRID_PADDING + c.x1 * CELL_SIZE;
+                  const y1 = GRID_PADDING + c.y1 * CELL_SIZE;
+                  const x2 = GRID_PADDING + c.x2 * CELL_SIZE;
+                  const y2 = GRID_PADDING + c.y2 * CELL_SIZE;
+
+                  if (!isGomoku) {
+                      return (
+                          <line 
+                              key={`${color}-loose-${i}`}
+                              x1={x1}
+                              y1={y1}
+                              x2={x2}
+                              y2={y2}
+                              stroke={baseColor}
+                              strokeWidth={CELL_SIZE * 0.12}
+                              strokeLinecap="round"
+                          />
+                      );
+                  }
+
+                  const dx = x2 - x1;
+                  const dy = y2 - y1;
+                  const len = Math.hypot(dx, dy) || 1;
+                  const ux = dx / len;
+                  const uy = dy / len;
+
+                  return (
+                      <line 
+                          key={`${color}-loose-${i}`}
+                          x1={x1 + ux * trim}
+                          y1={y1 + uy * trim}
+                          x2={x2 - ux * trim}
+                          y2={y2 - uy * trim}
+                          stroke={baseColor}
+                          strokeWidth={CELL_SIZE * 0.1}
+                          strokeLinecap="round"
+                      />
+                  );
+             })}
            </g>
         </g>
     );
@@ -501,6 +720,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                 touchState.current.isPanning = false;
             }, 100);
         }}
+        onMouseLeave={handleMouseLeaveBoard}
     >
       <style>{`
         @keyframes pulseSlow {
@@ -519,11 +739,20 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             animation: liquidFlow 2.5s ease-in-out infinite;
         }
         @keyframes liquidFlowGomoku {
-            0%, 100% { stroke-width: ${CELL_SIZE * 0.15}px; }
-            50% { stroke-width: ${CELL_SIZE * 0.25}px; }
+            0%, 100% { stroke-width: ${CELL_SIZE * 0.22}px; }
+            50% { stroke-width: ${CELL_SIZE * 0.13}px; }
         }
         .animate-liquid-flow-gomoku line {
             animation: liquidFlowGomoku 3s ease-in-out infinite;
+        }
+
+        /* [新增] 气流动动画 */
+        @keyframes dashFlow {
+            to { stroke-dashoffset: -20; }
+        }
+        .animate-dash-flow {
+            stroke-dasharray: 4, 6;
+            animation: dashFlow 1s linear infinite;
         }
       `}</style>
       <div 
@@ -550,6 +779,12 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                 <filter id="goo-silk">
                     <feGaussianBlur in="SourceGraphic" stdDeviation={CELL_SIZE * 0.15} result="blur" />
                     <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 25 -10" result="goo" />
+                    <feComposite in="SourceGraphic" in2="goo" operator="atop"/>
+                </filter>
+
+                <filter id="goo-silk-gomoku">
+                    <feGaussianBlur in="SourceGraphic" stdDeviation={CELL_SIZE * 0.08} result="blur" />
+                    <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -9" result="goo" />
                     <feComposite in="SourceGraphic" in2="goo" operator="atop"/>
                 </filter>
 
@@ -582,12 +817,29 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                 <filter id="qi-blur">
                     <feGaussianBlur in="SourceGraphic" stdDeviation={CELL_SIZE * 0.3} />
                 </filter>
+
+                {/* [新增] 气流发光滤镜 */}
+                <filter id="glow-flow" x="-20%" y="-20%" width="140%" height="140%">
+                    <feGaussianBlur stdDeviation="2" result="coloredBlur" />
+                    <feMerge>
+                        <feMergeNode in="coloredBlur" />
+                        <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                </filter>
+                
+                {/* [新增] 气流渐变色 */}
+                <linearGradient id="qi-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#4fc3f7" stopOpacity="0.6" />
+                    <stop offset="50%" stopColor="#e1f5fe" stopOpacity="1" />
+                    <stop offset="100%" stopColor="#4fc3f7" stopOpacity="0.6" />
+                </linearGradient>
             </defs>
             
-            {renderQiLayer()}
-
             <g>{renderGridLines()}</g>
             
+            {/* 气流层放在网格之上，棋子之下 */}
+            {renderQiFlow()}
+
             {renderCoordinates()}
 
             {starPoints.map(([x, y], i) => (
@@ -617,6 +869,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                             size={CELL_SIZE}
                             color={face.color === 'black' ? '#fff' : '#333'}
                             mood={face.mood}
+                            lookOffset={face.lookOffset}
                         />
                     </g>
                 </g>

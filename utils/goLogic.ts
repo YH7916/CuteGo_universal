@@ -1,5 +1,7 @@
 import { BoardState, Player, Point, Stone, Group, BoardSize, Difficulty, GameType } from '../types';
+import { getAIConfig } from './aiConfig';
 
+// --- 基础工具函数 ---
 export const createBoard = (size: number): BoardState => {
   return Array(size).fill(null).map(() => Array(size).fill(null));
 };
@@ -13,6 +15,7 @@ export const getNeighbors = (point: Point, size: number): Point[] => {
   return neighbors;
 };
 
+// [优化 1] 使用数字索引代替字符串 Key，大幅提升高频调用的性能
 export const getGroup = (board: BoardState, start: Point): Group | null => {
   const size = board.length;
   const stone = board[start.y][start.x];
@@ -20,11 +23,13 @@ export const getGroup = (board: BoardState, start: Point): Group | null => {
 
   const color = stone.color;
   const group: Stone[] = [];
-  const visited = new Set<string>();
+  // Optimization: use number set (y * size + x) instead of string set
+  const visited = new Set<number>();
   const queue: Point[] = [start];
-  const liberties = new Set<string>();
+  const liberties = new Set<number>();
 
-  visited.add(`${start.x},${start.y}`);
+  // Init
+  visited.add(start.y * size + start.x);
 
   while (queue.length > 0) {
     const current = queue.shift()!;
@@ -33,33 +38,41 @@ export const getGroup = (board: BoardState, start: Point): Group | null => {
 
     const neighbors = getNeighbors(current, size);
     for (const n of neighbors) {
-      const neighborKey = `${n.x},${n.y}`;
+      const idx = n.y * size + n.x;
       const neighborStone = board[n.y][n.x];
 
       if (!neighborStone) {
-        liberties.add(neighborKey);
-      } else if (neighborStone.color === color && !visited.has(neighborKey)) {
-        visited.add(neighborKey);
+        liberties.add(idx);
+      } else if (neighborStone.color === color && !visited.has(idx)) {
+        visited.add(idx);
         queue.push(n);
       }
     }
   }
 
-  return { stones: group, liberties: liberties.size };
+  return { 
+      stones: group, 
+      liberties: liberties.size,
+      // 保持接口兼容，还原回 Point 数组
+      libertyPoints: Array.from(liberties).map(idx => ({
+          x: idx % size,
+          y: Math.floor(idx / size)
+      }))
+  };
 };
 
 export const getAllGroups = (board: BoardState): Group[] => {
   const size = board.length;
-  const visited = new Set<string>();
+  const visited = new Set<number>(); // Optimization
   const groups: Group[] = [];
 
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const key = `${x},${y}`;
-      if (board[y][x] && !visited.has(key)) {
+      const idx = y * size + x;
+      if (board[y][x] && !visited.has(idx)) {
         const group = getGroup(board, { x, y });
         if (group) {
-          group.stones.forEach(s => visited.add(`${s.x},${s.y}`));
+          group.stones.forEach(s => visited.add(s.y * size + s.x));
           groups.push(group);
         }
       }
@@ -68,8 +81,8 @@ export const getAllGroups = (board: BoardState): Group[] => {
   return groups;
 };
 
-// Simple board hash for Ko detection
-const hashBoard = (board: BoardState): string => {
+export const getBoardHash = (board: BoardState): string => {
+    // 字符串拼接对于 React Hook 依赖检查是必须的，保持不变
     let str = '';
     for(let y=0; y<board.length; y++) {
         for(let x=0; x<board.length; x++) {
@@ -80,9 +93,9 @@ const hashBoard = (board: BoardState): string => {
     return str;
 };
 
-// --- Import / Export Logic ---
+// --- 序列化/反序列化 (保持不变) ---
 interface GameSnapshot {
-    board: string[][]; // Simplified board for JSON
+    board: string[][];
     size: number;
     turn: Player;
     type: GameType;
@@ -91,47 +104,20 @@ interface GameSnapshot {
 }
 
 export const serializeGame = (
-    board: BoardState, 
-    currentPlayer: Player, 
-    gameType: GameType,
-    bCaps: number,
-    wCaps: number
+    board: BoardState, currentPlayer: Player, gameType: GameType, bCaps: number, wCaps: number
 ): string => {
-    const simpleBoard = board.map(row => 
-        row.map(cell => cell ? (cell.color === 'black' ? 'B' : 'W') : '.')
-    );
-    
-    const snapshot: GameSnapshot = {
-        board: simpleBoard,
-        size: board.length,
-        turn: currentPlayer,
-        type: gameType,
-        bCaps,
-        wCaps
-    };
-
-    try {
-        return btoa(JSON.stringify(snapshot));
-    } catch (e) {
-        console.error("Serialization failed", e);
-        return "";
-    }
+    const simpleBoard = board.map(row => row.map(cell => cell ? (cell.color === 'black' ? 'B' : 'W') : '.'));
+    const snapshot: GameSnapshot = { board: simpleBoard, size: board.length, turn: currentPlayer, type: gameType, bCaps, wCaps };
+    try { return btoa(JSON.stringify(snapshot)); } catch (e) { console.error(e); return ""; }
 };
 
 export const deserializeGame = (key: string): { 
-    board: BoardState, 
-    currentPlayer: Player, 
-    gameType: GameType,
-    boardSize: BoardSize,
-    blackCaptures: number,
-    whiteCaptures: number 
+    board: BoardState, currentPlayer: Player, gameType: GameType, boardSize: BoardSize, blackCaptures: number, whiteCaptures: number 
 } | null => {
     try {
         const jsonStr = atob(key);
         const snapshot: GameSnapshot = JSON.parse(jsonStr);
-        
         if (!snapshot.board || !snapshot.size) return null;
-
         const newBoard: BoardState = snapshot.board.map((row, y) => 
             row.map((cell, x) => {
                 if (cell === 'B') return { color: 'black', x, y, id: `imported-b-${x}-${y}-${Date.now()}` };
@@ -139,140 +125,113 @@ export const deserializeGame = (key: string): {
                 return null;
             })
         );
-
-        return {
-            board: newBoard,
-            currentPlayer: snapshot.turn,
-            gameType: snapshot.type,
-            boardSize: snapshot.size as BoardSize,
-            blackCaptures: snapshot.bCaps,
-            whiteCaptures: snapshot.wCaps
-        };
-
-    } catch (e) {
-        console.error("Deserialization failed", e);
-        return null;
-    }
+        return { board: newBoard, currentPlayer: snapshot.turn, gameType: snapshot.type, boardSize: snapshot.size as BoardSize, blackCaptures: snapshot.bCaps, whiteCaptures: snapshot.wCaps };
+    } catch (e) { return null; }
 };
 
+// --- 核心落子逻辑 ---
 export const attemptMove = (
-  board: BoardState, 
-  x: number, 
-  y: number, 
-  player: Player,
-  gameType: 'Go' | 'Gomoku' = 'Go',
-  previousBoardStateHash: string | null = null
+  board: BoardState, x: number, y: number, player: Player, gameType: 'Go' | 'Gomoku' = 'Go', previousBoardStateHash: string | null = null
 ): { newBoard: BoardState; captured: number } | null => {
   if (board[y][x] !== null) return null;
-
   const size = board.length;
-  const nextBoard = board.map(row => row.map(s => s ? { ...s } : null));
-  nextBoard[y][x] = { color: player, id: `${player}-${Date.now()}-${x}-${y}`, x, y };
+  
+  // 浅拷贝优化：由于 Stone 对象在逻辑中通常视为不可变（只会被替换或移除，不会修改其属性），
+  // 我们可以只复制棋盘的行数组结构，而不需要复制每个棋子对象。
+  // 这将大幅减少内存分配和垃圾回收压力。
+  const safeBoard = board.map(row => [...row]);
 
-  if (gameType === 'Gomoku') {
-    return { newBoard: nextBoard, captured: 0 };
-  }
+  safeBoard[y][x] = { color: player, id: `${player}-${Date.now()}-${x}-${y}`, x, y };
+
+  if (gameType === 'Gomoku') return { newBoard: safeBoard, captured: 0 };
 
   let capturedCount = 0;
   const opponent = player === 'black' ? 'white' : 'black';
   const neighbors = getNeighbors({ x, y }, size);
 
   neighbors.forEach(n => {
-    const stone = nextBoard[n.y][n.x];
+    const stone = safeBoard[n.y][n.x];
     if (stone && stone.color === opponent) {
-      const group = getGroup(nextBoard, n);
+      const group = getGroup(safeBoard, n);
       if (group && group.liberties === 0) {
         group.stones.forEach(s => {
-          nextBoard[s.y][s.x] = null;
+          safeBoard[s.y][s.x] = null;
           capturedCount++;
         });
       }
     }
   });
 
-  const myGroup = getGroup(nextBoard, { x, y });
-  if (myGroup && myGroup.liberties === 0) {
-    return null; // Suicide is illegal
-  }
+  const myGroup = getGroup(safeBoard, { x, y });
+  // 自杀禁手检查：如果在这个位置落子后没气，且没有提掉对方的子，则为非法
+  if (myGroup && myGroup.liberties === 0 && capturedCount === 0) return null; 
 
-  // KO RULE CHECK
   if (previousBoardStateHash) {
-      const currentHash = hashBoard(nextBoard);
-      if (currentHash === previousBoardStateHash) {
-          return null; // Illegal due to Ko (repeating position)
-      }
+      const currentHash = getBoardHash(safeBoard);
+      if (currentHash === previousBoardStateHash) return null; // 简单的劫争检查
   }
 
-  return { newBoard: nextBoard, captured: capturedCount };
+  return { newBoard: safeBoard, captured: capturedCount };
 };
 
-export const checkGomokuWin = (board: BoardState, lastMove: {x: number, y: number}): boolean => {
+export const checkGomokuWin = (board: BoardState, lastMove: {x: number, y: number} | null): boolean => {
+  if (!lastMove) return false;
   const { x, y } = lastMove;
   const player = board[y][x]?.color;
   if (!player) return false;
   const size = board.length;
-
   const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
-
   for (const [dx, dy] of directions) {
     let count = 1;
     let i = 1;
     while (true) {
-      const nx = x + dx * i;
-      const ny = y + dy * i;
-      if (nx >= 0 && nx < size && ny >= 0 && ny < size && board[ny][nx]?.color === player) {
-        count++; i++;
-      } else break;
+      const nx = x + dx * i; const ny = y + dy * i;
+      if (nx >= 0 && nx < size && ny >= 0 && ny < size && board[ny][nx]?.color === player) { count++; i++; } else break;
     }
     i = 1;
     while (true) {
-      const nx = x - dx * i;
-      const ny = y - dy * i;
-      if (nx >= 0 && nx < size && ny >= 0 && ny < size && board[ny][nx]?.color === player) {
-        count++; i++;
-      } else break;
+      const nx = x - dx * i; const ny = y - dy * i;
+      if (nx >= 0 && nx < size && ny >= 0 && ny < size && board[ny][nx]?.color === player) { count++; i++; } else break;
     }
     if (count >= 5) return true;
   }
   return false;
 };
 
+// [优化 2] 使用数字 Set 优化算分
 export const calculateScore = (board: BoardState): { black: number, white: number } => {
   const size = board.length;
-  let blackScore = 0;
-  let whiteScore = 0;
-  const visited = new Set<string>();
-
+  let blackScore = 0, whiteScore = 0;
+  const visited = new Set<number>();
+  
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const key = `${x},${y}`;
-      if (visited.has(key)) continue;
-
+      const idx = y * size + x;
+      if (visited.has(idx)) continue;
+      
       const stone = board[y][x];
       if (stone) {
-        if (stone.color === 'black') blackScore++;
-        else whiteScore++;
-        visited.add(key);
+        if (stone.color === 'black') blackScore++; else whiteScore++;
+        visited.add(idx);
       } else {
         const region: Point[] = [];
         const regionQueue: Point[] = [{x, y}];
-        visited.add(key);
-        let touchesBlack = false;
-        let touchesWhite = false;
-
+        visited.add(idx);
+        let touchesBlack = false, touchesWhite = false;
+        
         while(regionQueue.length > 0) {
            const p = regionQueue.shift()!;
            region.push(p);
            const neighbors = getNeighbors(p, size);
-           
            for(const n of neighbors) {
-              const nKey = `${n.x},${n.y}`;
+              const nIdx = n.y * size + n.x;
               const nStone = board[n.y][n.x];
+              
               if(nStone) {
                  if(nStone.color === 'black') touchesBlack = true;
                  if(nStone.color === 'white') touchesWhite = true;
-              } else if (!visited.has(nKey)) {
-                 visited.add(nKey);
+              } else if (!visited.has(nIdx)) {
+                 visited.add(nIdx);
                  regionQueue.push(n);
               }
            }
@@ -286,317 +245,934 @@ export const calculateScore = (board: BoardState): { black: number, white: numbe
   return { black: blackScore, white: whiteScore };
 };
 
+// [优化] 计算启发式分数（不仅看地盘，还看棋子安全性与潜力）
+const calculateHeuristicScore = (board: BoardState): { black: number, white: number } => {
+    const size = board.length;
+    let blackScore = 0, whiteScore = 0;
+    const visited = new Set<number>();
+    const allGroups = getAllGroups(board);
+
+    // 1. 基础地盘分（Territory）
+    const territoryScore = calculateScore(board);
+    blackScore += territoryScore.black;
+    whiteScore += territoryScore.white;
+
+    // 2. 棋子安全性修正 (Group Safety)
+    allGroups.forEach(group => {
+        const isBlack = group.stones[0].color === 'black';
+        const numStones = group.stones.length;
+        
+        // 惩罚：气太少（不稳定）
+        if (group.liberties === 1) {
+            // 极度危险，可以说是死棋（除非是打劫或杀气，这里做静态悲观估计）
+            // 扣除掉这些子的价值，甚至倒扣
+            if (isBlack) blackScore -= numStones * 1.5; 
+            else whiteScore -= numStones * 1.5;
+        } else if (group.liberties === 2) {
+            // 危险
+            if (isBlack) blackScore -= numStones * 0.5;
+            else whiteScore -= numStones * 0.5;
+        } else if (group.liberties >= 5) {
+            // 奖励：气长（厚势）
+            if (isBlack) blackScore += 2;
+            else whiteScore += 2;
+        }
+
+        // 3. 影响力修正 (Influence - 仅在开局/中局有效)
+        // 鼓励占据星位和天元附近
+        group.stones.forEach(s => {
+             const distToCenter = Math.abs(s.x - size / 2) + Math.abs(s.y - size / 2);
+             const normalizedDist = distToCenter / (size / 2); // 0 (center) ~ 1 (edge)
+             
+             // 中心区域（影响力）加分，但在边缘（实地）通常已经被 territoryScore 算进去了
+             // 所以这里只给中间的子一点“潜力分”
+             if (normalizedDist < 0.6) {
+                 if (isBlack) blackScore += 0.2;
+                 else whiteScore += 0.2;
+             }
+        });
+    });
+
+    return { black: blackScore, white: whiteScore };
+};
+
 export const calculateWinRate = (board: BoardState): number => {
-    const score = calculateScore(board);
-    const diff = score.black - score.white; 
-    const k = 0.15; 
+    let stoneCount = 0;
+    const size = board.length;
+    const totalPoints = size * size;
+    for(let y=0; y<size; y++) for(let x=0; x<size; x++) if (board[y][x]) stoneCount++;
+    
+    // 开局阶段（小于5%手），不确定性极大，强制接近 50%
+    // if (stoneCount < totalPoints * 0.05) return 50; // Removed hard limit to allow subtle heuristics to show
+
+    const fillRatio = stoneCount / totalPoints;
+    const heuristic = calculateHeuristicScore(board);
+    const diff = heuristic.black - heuristic.white; 
+
+    // K 值动态调整：
+    // 开局 (fill=0.1) -> k 小 (0.08) -> 分数差距对胜率影响小（还早）
+    // 终局 (fill=0.9) -> k 大 (0.25) -> 分数差距即使小，胜率也倾斜大（基本定型）
+    const baseK = 0.08;
+    const endK = 0.35;
+    const k = baseK + (endK - baseK) * (fillRatio * fillRatio); // 平方曲线，中盘才开始变陡
+
     return (1 / (1 + Math.exp(-k * diff))) * 100;
 };
 
-// --- ADVANCED AI LOGIC ---
+// --- 增强版 AI 系统 ---
 
-// Helper: Check if a spot is a real eye (very basic)
-const isEye = (board: BoardState, x: number, y: number, color: Player): boolean => {
+// [优化 3] 增加“真眼”识别，防止 AI 填自己的眼
+const isSimpleEye = (board: BoardState, x: number, y: number, color: Player): boolean => {
     const size = board.length;
+    // 1. 检查四周十字方向，如果不是自己的子或边缘，则不是眼
     const neighbors = getNeighbors({x, y}, size);
-    if (neighbors.length === 0) return false;
-    // An eye must be surrounded by friendly stones
-    const orthoCheck = neighbors.every(n => board[n.y][n.x]?.color === color);
-    if (!orthoCheck) return false;
-    return true;
-}
-
-// Gomoku: Enhanced pattern evaluation
-const evaluateGomokuDirection = (board: BoardState, x: number, y: number, dx: number, dy: number, player: Player): number => {
-  let count = 0;
-  let blockedStart = false;
-  let blockedEnd = false;
-  const size = board.length;
-
-  // Check forward
-  for (let i = 1; i <= 4; i++) {
-    const nx = x + dx * i;
-    const ny = y + dy * i;
-    if (nx < 0 || nx >= size || ny < 0 || ny >= size) { blockedEnd = true; break; }
-    const stone = board[ny][nx];
-    if (stone?.color === player) count++;
-    else if (stone) { blockedEnd = true; break; }
-    else break; 
-  }
-  
-  // Check backward
-  for (let i = 1; i <= 4; i++) {
-    const nx = x - dx * i;
-    const ny = y - dy * i;
-    if (nx < 0 || nx >= size || ny < 0 || ny >= size) { blockedStart = true; break; }
-    const stone = board[ny][nx];
-    if (stone?.color === player) count++;
-    else if (stone) { blockedStart = true; break; }
-    else break;
-  }
-
-  // Count includes the hypothetical stone placed at x,y
-  const total = count + 1;
-
-  // Scoring Weights (Exponential for strict tiering)
-  // Win
-  if (total >= 5) return 100000;
-  
-  // 4 in a row
-  if (total === 4) {
-      if (!blockedStart && !blockedEnd) return 10000; // Live 4 (Unstoppable)
-      if (!blockedStart || !blockedEnd) return 1000;  // Dead 4 (Must block)
-  }
-  
-  // 3 in a row
-  if (total === 3) {
-      if (!blockedStart && !blockedEnd) return 1000; // Live 3 (Very dangerous)
-      if (!blockedStart || !blockedEnd) return 100;  // Dead 3
-  }
-  
-  // 2 in a row
-  if (total === 2) {
-      if (!blockedStart && !blockedEnd) return 100; // Live 2
-      if (!blockedStart || !blockedEnd) return 10;
-  }
-  
-  return 1;
-};
-
-// Gomoku: Score a position based on all 4 directions
-const getGomokuScore = (board: BoardState, x: number, y: number, player: Player, opponent: Player, difficulty: Difficulty): number => {
-    const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
-    let attackScore = 0;
-    let defenseScore = 0;
-
-    for (const [dx, dy] of directions) {
-        attackScore += evaluateGomokuDirection(board, x, y, dx, dy, player);
-        defenseScore += evaluateGomokuDirection(board, x, y, dx, dy, opponent);
+    for (const n of neighbors) {
+        const s = board[n.y][n.x];
+        if (!s || s.color !== color) return false;
     }
     
-    // In Hard mode, we prioritize defense slightly more if the opponent has a strong threat
-    if (difficulty === 'Hard') {
-        // If opponent has a winning move or a Live 4, blocking is top priority
-        if (defenseScore >= 9000) return defenseScore * 1.2; 
-        // If we have a win, take it
-        if (attackScore >= 9000) return attackScore * 1.5;
-        
-        // Block Live 3s heavily
-        if (defenseScore >= 900) return defenseScore * 1.1;
-    } 
-    // Medium Mode logic
-    else if (difficulty === 'Medium') {
-        if (defenseScore >= 5000) return defenseScore * 1.1;
+    // 2. 检查对角线，防止假眼
+    // 规则：对于非边缘的眼，4个对角点至少要有3个是自己的子；边缘则适当放宽
+    let corners = 0;
+    let myCorners = 0;
+    const diags = [[-1,-1], [-1,1], [1,-1], [1,1]];
+    
+    for (const [dx, dy] of diags) {
+        const nx = x+dx, ny = y+dy;
+        if (nx < 0 || nx >= size || ny < 0 || ny >= size) {
+             // 棋盘外算作“保护”，计入 myCorners
+             corners++;
+             myCorners++;
+        } else {
+             corners++;
+             const s = board[ny][nx];
+             if (s && s.color === color) myCorners++;
+        }
     }
-
-    return attackScore + defenseScore;
+    
+    // 简单判定：如果有2个以上对角线不是自己的，可能是假眼，但为了安全，
+    // 我们只保护非常确定的真眼（防止AI自杀），所以严格一点：
+    // 如果是我方控制的角落少于3个，就不视为绝对安全的真眼（允许填）
+    // 反之，如果是真眼，绝对不填。
+    if (myCorners < 3) return false; 
+    
+    return true;
 };
 
-// --- MAIN AI FUNCTION ---
+// 1. 候选点生成器
+const getCandidateMoves = (board: BoardState, size: number, range: number = 2): Point[] => {
+  const candidates = new Set<number>(); // Optimization
+  const hasStones = board.some(row => row.some(s => s !== null));
+
+  if (!hasStones) {
+      const center = Math.floor(size / 2);
+      // 9x9 天元
+      if (size <= 9) return [{x: center, y: center}];
+      
+      // 13x13 或 19x19 推荐星位
+      const points: Point[] = [];
+      const offset = size >= 19 ? 3 : 3; // 19路或13路都通常在4线(index 3)或3线
+      // 传统星位 (4线)
+      points.push(
+          {x: 3, y: 3}, {x: size-4, y: 3}, 
+          {x: 3, y: size-4}, {x: size-4, y: size-4}
+      );
+      // 加上天元
+      points.push({x: center, y: center});
+      return points;
+  }
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (board[y][x] !== null) {
+        for (let dy = -range; dy <= range; dy++) {
+          for (let dx = -range; dx <= range; dx++) {
+            const ny = y + dy;
+            const nx = x + dx;
+            if (nx >= 0 && nx < size && ny >= 0 && ny < size && board[ny][nx] === null) {
+               candidates.add(ny * size + nx);
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  if (candidates.size === 0) {
+      // 极罕见情况：棋盘满了或者只有无气的子？
+      // 回退到遍历所有空点
+      const all: Point[] = [];
+      for(let y=0; y<size; y++) for(let x=0; x<size; x++) if(!board[y][x]) all.push({x,y});
+      return all;
+  }
+  return Array.from(candidates).map(idx => ({x: idx % size, y: Math.floor(idx / size)}));
+};
+
+// 2. 棋形评估
+const evaluateShape = (board: BoardState, x: number, y: number, player: Player): number => {
+  const size = board.length;
+  let score = 0;
+  const opponent = player === 'black' ? 'white' : 'black';
+
+  // 1. 虎口/连接检测 (Tiger's Mouth / Connection)
+  const diagonals = [
+    {x: x-1, y: y-1}, {x: x+1, y: y-1},
+    {x: x-1, y: y+1}, {x: x+1, y: y+1}
+  ];
+  let myStonesDiag = 0;
+  diagonals.forEach(p => {
+    if (p.x >= 0 && p.x < size && p.y >= 0 && p.y < size) {
+      const stone = board[p.y][p.x];
+      if (stone && stone.color === player) myStonesDiag++;
+    }
+  });
+  if (myStonesDiag >= 2) score += 15; // 鼓励连接形状
+
+  // 2. 扭羊头/切断检测 (Cut)
+  const neighbors = getNeighbors({x, y}, size);
+  let opponentStones = 0;
+  neighbors.forEach(p => {
+    const stone = board[p.y][p.x];
+    if (stone && stone.color === opponent) opponentStones++;
+  });
+  if (opponentStones >= 2) score += 10; // 关键切断点
+
+  return score;
+};
+
+// 3. 影响力/位置评分
+const evaluatePositionStrength = (x: number, y: number, size: number): number => {
+  if (size >= 13) {
+    const dX = Math.min(x, size - 1 - x);
+    const dY = Math.min(y, size - 1 - y);
+    if ((dX === 2 || dX === 3) && (dY === 2 || dY === 3)) return 25; // 金角银边
+    if (dX === 2 && dY === 4) return 20;
+    if (dX === 0 || dY === 0) return -20; // 除非必要，少下断头路
+    if (dX === 1 || dY === 1) return -5;  // 爬二路通常不好
+  }
+  const center = Math.floor(size / 2);
+  const distToCenter = Math.abs(x - center) + Math.abs(y - center);
+  return Math.max(0, 10 - distToCenter);
+};
+
+// 4. 五子棋评估核心 (Heuristics - Stronger Version)
+const GOMOKU_SCORES = {
+  WIN: 100000000,
+  OPEN_4: 10000000,
+  CLOSED_4: 1000000, // Still deadly if not blocked
+  OPEN_3: 100000,    // Major threat
+  CLOSED_3: 1000,
+  OPEN_2: 100,
+  CLOSED_2: 10
+};
+
+// Check for specific patterns in a line (bitmask style or string match logic)
+const evaluateLine = (board: BoardState, x: number, y: number, dx: number, dy: number, player: Player): number => {
+  const size = board.length;
+  // Extract a line of 9 points centered at x,y:  [-4, -3, -2, -1, 0, 1, 2, 3, 4]
+  // 0 is the candidate move position (which is currently empty or simulated)
+  
+  const line: number[] = []; // 1=Me, -1=Opponent, 0=Empty, 2=Wall
+  
+  for (let i = -4; i <= 4; i++) {
+    const nx = x + dx * i;
+    const ny = y + dy * i;
+    if (nx < 0 || nx >= size || ny < 0 || ny >= size) {
+      line.push(2); // Wall
+    } else {
+      const stone = board[ny][nx];
+      if (stone) {
+        line.push(stone.color === player ? 1 : -1);
+      } else {
+        if (i === 0) line.push(1); // Assume we play here
+        else line.push(0);
+      }
+    }
+  }
+
+  // Current pos is at index 4 (center)
+  // Simple pattern matching for optimization
+  // Convert to string for regex-like matching or perform manual checks
+  // Let's do a sliding window check for 5 positions containing the center
+  
+  let score = 0;
+
+  // Helper to count metrics in a window
+  // "Window" size 5.
+  // We check all windows of size 5 that include index 4.
+  // Windows starting at: 0 (0-4), 1 (1-5), 2 (2-6), 3 (3-7), 4 (4-8)
+  
+  let maxConsecutive = 0;
+  let open4 = 0;
+  let closed4 = 0;
+  let open3 = 0;
+  let broken3 = 0; // X.XX or XX.X
+
+  // --- Strict 5-in-a-row Check ---
+  // If any window of 5 is all 1s -> WIN
+  for (let start = 0; start <= 4; start++) {
+    let count = 0;
+    for (let k = 0; k < 5; k++) {
+      if (line[start + k] === 1) count++;
+      else if (line[start + k] === -1 || line[start + k] === 2) { count = -99; break; }
+    }
+    if (count === 5) return GOMOKU_SCORES.WIN;
+  }
+  
+  // If not win, detailed analysis
+  // We analyze the full line segment to find the "best" shape we created.
+  
+  // 1. Check for Open 4 ( .XXXX. )
+  // The line array has 9 elements. Center is 4.
+  // We need to look for patterns involving index 4.
+  
+  // Convert line to simplified string for easier logic? 
+  // 1: Stone, 0: Empty, -1: Opp, 2: Wall
+  // Optimizing: Just scan directions for "Live 4", "Dead 4", "Live 3"
+  
+  // Reuse the logic of counting consecutive stones + openings
+  let consec = 1;
+  let leftOpen = false;
+  let rightOpen = false;
+  
+  // Left scan
+  for (let i = 1; i <= 4; i++) {
+      const val = line[4 - i];
+      if (val === 1) consec++;
+      else {
+          if (val === 0) leftOpen = true;
+          break;
+      }
+  }
+  
+  // Right scan
+  for (let i = 1; i <= 4; i++) {
+      const val = line[4 + i];
+      if (val === 1) consec++;
+      else {
+          if (val === 0) rightOpen = true;
+          break;
+      }
+  }
+  
+  if (consec >= 5) return GOMOKU_SCORES.WIN;
+  if (consec === 4) {
+      if (leftOpen && rightOpen) return GOMOKU_SCORES.OPEN_4;
+      if (leftOpen || rightOpen) return GOMOKU_SCORES.CLOSED_4;
+      return 0; // Totally blocked 4 is useless
+  }
+  if (consec === 3) {
+      if (leftOpen && rightOpen) {
+          // Check for "Jump 4" (Broken 4) e.g. X.XXX
+          // If we have open ends, it is at least Open 3.
+          // But check if we can extend to 4 through the gap?
+          return GOMOKU_SCORES.OPEN_3;
+      }
+      if (leftOpen || rightOpen) return GOMOKU_SCORES.CLOSED_3;
+      return 0;
+  }
+  if (consec === 2) {
+      if (leftOpen && rightOpen) return GOMOKU_SCORES.OPEN_2;
+      return GOMOKU_SCORES.CLOSED_2;
+  }
+  
+  // Special Case: Broken 4 (X.XXX or XX.XX)
+  // This is as strong as Closed 4 (requires immediate block)
+  // Check pattern X X . X X  (Center can be the dot or the X)
+  // In this function, center IS an X (simulated).
+  // So we look for 1 0 1 1 1 etc.
+  
+  // Hard to scan generically. Let's do specific pattern checks for "Broken" shapes centered at 4.
+  // Pattern: 1 1 0 1 -> If index 4 closes the gap
+  
+  const checkPattern = (pat: number[]) => {
+      // Pat is an array like [1, 1, 1, 0, 1] relative to center?
+      // Too complex.
+      return false;
+  };
+
+  return score;
+};
+
+// Simplified but Stronger Shape Evaluator
+const getGomokuShapeScore = (board: BoardState, x: number, y: number, player: Player): number => {
+    const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
+    let totalScore = 0;
+    const size = board.length;
+
+    for (const [dx, dy] of directions) {
+        // Collect line for 9 cells
+        const line: number[] = [];
+        for(let k=-4; k<=4; k++) {
+            const nx = x + k*dx;
+            const ny = y + k*dy;
+            if(nx<0||nx>=size||ny<0||ny>=size) line.push(2); // Wall
+            else {
+                const s = board[ny][nx];
+                if(s) line.push(s.color === player ? 1 : -1);
+                else line.push(0);
+            }
+        }
+        // Center is at index 4, assume we play there (1)
+        line[4] = 1; 
+
+        // Analyze this line buffer
+        totalScore += analyzeLineBuffer(line);
+    }
+    return totalScore;
+};
+
+const analyzeLineBuffer = (line: number[]): number => {
+    // line length 9. 1=Me, -1=Opp, 0=Empty, 2=Wall
+    // We look for patterns of '1'
+    
+    let score = 0;
+    
+    // Convert to string for internal pattern matching
+    // Map: 1->X, -1->O, 0->_, 2->|
+    const str = line.map(v => v===1?'X':(v===-1||v===2?'O':'_')).join('');
+    
+    // Patterns
+    if (str.includes('XXXXX')) return GOMOKU_SCORES.WIN;
+    
+    // Live 4: _XXXX_
+    if (str.includes('_XXXX_')) return GOMOKU_SCORES.OPEN_4;
+    
+    // Dead 4: OXXXX_ or _XXXXO or X_XXX or XXX_X or XX_XX 
+    // (Broken 4s are effectively Dead 4s usually, or better if open edges)
+    if (str.includes('XXXX_') || str.includes('_XXXX')) return GOMOKU_SCORES.CLOSED_4;
+    if (str.includes('X_XXX') || str.includes('XXX_X') || str.includes('XX_XX')) {
+        // These are broken 4s. If they are bounded by _, they are huge.
+        // e.g. _XX_XX_ is a "Live Broken 4" -> effectively Open 4 logic? 
+        // No, _XX_XX_ needs 1 move to become _XXXXX_ (Win). 
+        // Standard Open 4 _XXXX_ needs 1 move to Win.
+        // So Broken 4 is roughly equal to Closed 4 (Force opponent to block).
+        return GOMOKU_SCORES.CLOSED_4;
+    }
+
+    // Live 3: _XXX_ or _X_XX_ or _XX_X_
+    if (str.includes('_XXX_')) return GOMOKU_SCORES.OPEN_3;
+    if (str.includes('_X_XX_') || str.includes('_XX_X_')) return GOMOKU_SCORES.OPEN_3;
+
+    // Dead 3: _XXXO or OXXX_
+    if (str.includes('_XXX') || str.includes('XXX_')) return GOMOKU_SCORES.CLOSED_3;
+    
+    // Live 2: _XX_ or _X_X_
+    if (str.includes('_XX_') || str.includes('_X_X_')) return GOMOKU_SCORES.OPEN_2;
+    
+    return 0;
+};
+
+const getGomokuScore = (board: BoardState, x: number, y: number, player: Player, opponent: Player, strict: boolean): number => {
+    // 1. Offensive Score (What I gain)
+    const attackScore = getGomokuShapeScore(board, x, y, player);
+    
+    // 2. Defensive Score (What I deny opponent)
+    // Pretend opponent plays here
+    const defendScore = getGomokuShapeScore(board, x, y, opponent);
+
+    // Weights
+    // If I can WIN, do it.
+    if (attackScore >= GOMOKU_SCORES.WIN) return GOMOKU_SCORES.WIN * 10;
+    
+    // If Opponent can WIN, MUST Block (unless I win first, covered above).
+    if (defendScore >= GOMOKU_SCORES.WIN) return GOMOKU_SCORES.WIN; // Critical Block
+    
+    // If I have Open 4, I will win next turn (unless opponnent wins now).
+    if (attackScore >= GOMOKU_SCORES.OPEN_4) return GOMOKU_SCORES.OPEN_4 * 10;
+    
+    // If Opponent has Open 4, I lose if I don't block. 
+    // Actually, if opponent has Open 4, blocking one side leaves the other. It's usually game over.
+    // But we must try.
+    if (defendScore >= GOMOKU_SCORES.OPEN_4) return GOMOKU_SCORES.OPEN_4; 
+    
+    // If I make a Closed 4 (Threat), opponent must answer.
+    // If Opponent makes Closed 4, I must answer.
+    
+    // General formula: Attack + Defense typically triggers good moves.
+    // But we prioritize critical threats.
+    
+    // Strict Mode: For filtering candidate moves in Minimax
+    if (strict) {
+       // Only return high value moves
+       if (attackScore + defendScore < GOMOKU_SCORES.CLOSED_2) return 0;
+    }
+    
+    // Weight Defense slightly higher to be safe? 
+    // Or Attack? 
+    // In Gomoku, initiative is key.
+    return attackScore + defendScore * 0.9;
+};
+
+const minimaxGomoku = (
+    board: BoardState, 
+    depth: number, 
+    alpha: number, 
+    beta: number, 
+    isMaximizing: boolean, 
+    player: Player, 
+    lastMove: Point | null
+): number => {
+    // Check Terminal (Win/Loss)
+    if (lastMove && checkGomokuWin(board, lastMove)) {
+        // If the *current* player just moved and won, that's great for them.
+        // But minimax is called *after* the move.
+        // So if we are here, the previous mover (Opponent of current recursion) won.
+        // If isMaximizing=true, it means 'We' are about to move, but 'They' (Minimizer) just moved and won.
+        // So Score is -Infinity.
+        return isMaximizing ? -100000000 : 100000000;
+    }
+    
+    if (depth === 0) return 0;
+
+    const size = board.length;
+    const candidates = getCandidateMoves(board, size, 2);
+    if (candidates.length === 0) return 0;
+
+    const myColor = player;
+    const opColor = player === 'black' ? 'white' : 'black';
+    // Current Mover Color
+    const currentColor = isMaximizing ? player : opColor;
+    const nextColor    = isMaximizing ? opColor : player; // For next recursion
+    
+    // Heuristic Sort (Move Ordering)
+    // We want to verify the BEST moves first.
+    // For the current player, we want moves that give high Shape Score.
+    const scoredMoves = candidates.map(pt => {
+        // Evaluate based on Current Player's View
+        // Is this move good for me?
+        // We use the combined Attack/Defense score.
+        const score = getGomokuScore(board, pt.x, pt.y, currentColor, isMaximizing ? opColor : player, false);
+        return { pt, score };
+    });
+    
+    scoredMoves.sort((a,b) => b.score - a.score);
+    
+    // Pruning: Only look at top K moves
+    // Deep search handles the rest.
+    const branching = depth > 2 ? 8 : 12; // Wider at shallow depths? No, typically Narrows deeper.
+    const movesToSearch = scoredMoves.slice(0, branching);
+
+    if (isMaximizing) {
+        let maxEval = -Infinity;
+        for (const {pt} of movesToSearch) {
+            // Check immediate win to save time
+            // (checkGomokuWin handles logic, but this is pre-move optimization)
+            
+            // Execute
+            board[pt.y][pt.x] = { color: player, x: pt.x, y: pt.y, id: 'sim' };
+            
+            const evalScore = minimaxGomoku(board, depth - 1, alpha, beta, false, player, pt);
+            
+            // Backtrack
+            board[pt.y][pt.x] = null;
+            
+            // Soft positional bonus to break ties
+            const bonus = pt.x === Math.floor(size/2) && pt.y === Math.floor(size/2) ? 10 : 0;
+
+            const total = evalScore + bonus * 0.01;
+            
+            maxEval = Math.max(maxEval, total);
+            alpha = Math.max(alpha, total);
+            if (beta <= alpha) break; 
+        }
+        return maxEval;
+    } else {
+        let minEval = Infinity;
+        for (const {pt} of movesToSearch) {
+            board[pt.y][pt.x] = { color: opColor, x: pt.x, y: pt.y, id: 'sim' };
+            
+            const evalScore = minimaxGomoku(board, depth - 1, alpha, beta, true, player, pt);
+            
+            board[pt.y][pt.x] = null;
+            
+            // Minus bonus? (Good for opponent is bad for us)
+            // But evalScore is already from maximizing perspective.
+            // If evalScore is high, it means MAX is winning.
+            // MIN wants to minimize that.
+            
+            minEval = Math.min(minEval, evalScore);
+            beta = Math.min(beta, evalScore);
+            if (beta <= alpha) break;
+        }
+        return minEval;
+    }
+};
 
 export const getAIMove = (
-  board: BoardState, 
-  player: Player, 
-  gameType: 'Go' | 'Gomoku',
+  board: BoardState,
+  player: Player,
+  gameType: GameType,
   difficulty: Difficulty,
   previousBoardHash: string | null
 ): Point | null | 'RESIGN' => {
   const size = board.length;
-  const validMoves: Point[] = [];
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      if (!board[y][x]) validMoves.push({ x, y });
-    }
-  }
-  if (validMoves.length === 0) return null;
-
-  // --- GOMOKU AI ---
-  if (gameType === 'Gomoku') {
-      if (difficulty === 'Easy') {
-          // Pure randomness
-          return validMoves[Math.floor(Math.random() * validMoves.length)];
-      }
-
-      const opponent = player === 'black' ? 'white' : 'black';
-      let bestScore = -Infinity;
-      let bestMoves: Point[] = [];
-
-      // Determine error margin based on difficulty
-      const errorMargin = difficulty === 'Medium' ? 100 : 0; // No error margin for Hard
-
-      for (const move of validMoves) {
-          // Optimization: Only check moves near existing stones (Radius 2)
-          // For empty board, center is best.
-          const hasNeighbor = validMoves.length > size*size - 1 ? false : (() => {
-               for(let dy=-2; dy<=2; dy++) {
-                   for(let dx=-2; dx<=2; dx++) {
-                       if (dx===0 && dy===0) continue;
-                       const ny = move.y + dy;
-                       const nx = move.x + dx;
-                       if(nx>=0 && nx<size && ny>=0 && ny<size && board[ny][nx]) return true;
-                   }
-               }
-               return false;
-          })();
-
-          // First move logic
-          if (validMoves.length >= size*size - 1) {
-              if (move.x === Math.floor(size/2) && move.y === Math.floor(size/2)) return move;
-          }
-
-          if (!hasNeighbor && validMoves.length < size*size - 1) continue;
-
-          let score = getGomokuScore(board, move.x, move.y, player, opponent, difficulty);
-          
-          // Positional Bias (Center is better)
-          const distFromCenter = Math.abs(move.x - size/2) + Math.abs(move.y - size/2);
-          score += (size - distFromCenter);
-
-          // Fuzzy Logic for Medium
-          if (difficulty === 'Medium') {
-             score += (Math.random() * errorMargin);
-          }
-
-          if (score > bestScore) {
-              bestScore = score;
-              bestMoves = [move];
-          } else if (Math.abs(score - bestScore) < 10) { // Keep moves with similar scores
-              bestMoves.push(move);
-          }
-      }
-      
-      // If no strategic moves found (e.g. only distant valid moves), pick random
-      if (bestMoves.length === 0) return validMoves[Math.floor(Math.random() * validMoves.length)];
-      
-      return bestMoves[Math.floor(Math.random() * bestMoves.length)];
-  }
-
-  // --- GO AI ---
+  // const opponent = player === 'black' ? 'white' : 'black'; // Unused in this scope
   
-  // Resignation Check for Hard/Medium
-  if (difficulty !== 'Easy') {
-       // Estimate game progress by stone count
-       let occupiedCount = 0;
-       for(let y=0; y<size; y++) for(let x=0; x<size; x++) if(board[y][x]) occupiedCount++;
-       
-       // Only check for resignation if game is > 40% developed to avoid early surrender
-       if (occupiedCount > (size * size) * 0.4) {
-           const score = calculateScore(board);
-           const aiScore = player === 'black' ? score.black : score.white;
-           const opponentScore = player === 'black' ? score.white : score.black;
-           const scoreDiff = aiScore - opponentScore;
-           
-           // If AI is behind by 30 points (considering our scoring algo is simple, 30 is a safe margin)
-           // and it's Hard mode (AI recognizes defeat), it resigns.
-           if (scoreDiff < -30) {
-               return 'RESIGN';
-           }
-       }
+  // 1. Gomoku AI Logic
+  if (gameType === 'Gomoku') {
+      const candidates = getCandidateMoves(board, size, 2);
+      if (candidates.length === 0) return { x: Math.floor(size/2), y: Math.floor(size/2) }; // Center start
+
+      // Difficulty Safe Mapping
+      // If user switches from Go (Rank) to Gomoku without changing difficulty, map roughly:
+      let safeDifficulty = difficulty;
+      if (!['Easy', 'Medium', 'Hard'].includes(difficulty)) {
+          // Heuristic mapping
+          if (difficulty.includes('k')) safeDifficulty = 'Easy';
+          else if (difficulty.includes('d')) safeDifficulty = 'Hard';
+          else safeDifficulty = 'Medium';
+      }
+
+      let depth = 2;
+      
+      if (safeDifficulty === 'Easy') {
+          depth = 2; // Fast
+      } else if (safeDifficulty === 'Medium') {
+          depth = 3; // Balanced
+      } else if (safeDifficulty === 'Hard') {
+          depth = 4; // Deep enough for 99% of casual games, vastly faster than 6
+      }
+      
+      let bestMove: Point | null = null;
+      let bestVal = -Infinity;
+      
+      const opColor = player === 'black' ? 'white' : 'black';
+      
+      // 1. Win Check (Depth 0)
+      for (const m of candidates) {
+          if (getGomokuShapeScore(board, m.x, m.y, player) >= GOMOKU_SCORES.WIN) return m;
+      }
+      // 2. Block Check (Depth 0)
+      for (const m of candidates) {
+          if (getGomokuShapeScore(board, m.x, m.y, opColor) >= GOMOKU_SCORES.WIN) return m;
+      }
+      
+      // 3. Search
+      const scoredCandidates = candidates.map(pt => ({
+          pt,
+          score: getGomokuScore(board, pt.x, pt.y, player, opColor, true)
+      })).sort((a,b) => b.score - a.score);
+      
+      // Adaptive beam width
+      let searchCount = 4;
+      if (safeDifficulty === 'Medium') searchCount = 6;
+      if (safeDifficulty === 'Hard') searchCount = 8;
+
+      const topMoves = scoredCandidates.slice(0, searchCount).map(s => s.pt);
+      
+      // Easy Mode Special Behavior: deterministically suboptimal?
+      // Or just shallow? 
+      // User asked: "Do not use random algorithm".
+      // So allow shallow search to pick best it sees.
+      
+      for (const move of topMoves) {
+          board[move.y][move.x] = { color: player, x: move.x, y: move.y, id: 'sim' };
+          
+          const val = minimaxGomoku(board, depth - 1, -Infinity, Infinity, false, player, move);
+          
+          board[move.y][move.x] = null;
+          
+           // Positional bias for center control (Deterministic tie-breaker)
+           const bias = (10 - (Math.abs(move.x - size/2) + Math.abs(move.y - size/2))) * 10;
+           const finalVal = val + bias;
+
+          if (finalVal > bestVal) {
+              bestVal = finalVal;
+              bestMove = move;
+          }
+      }
+      
+      return bestMove || candidates[0];
   }
 
-  // Easy: Random valid moves (avoids suicide/eyes)
-  if (difficulty === 'Easy') {
-    const safeMoves = validMoves.filter(m => {
-        const res = attemptMove(board, m.x, m.y, player, 'Go', previousBoardHash);
-        if (!res) return false;
-        return !isEye(board, m.x, m.y, player);
-    });
-    return safeMoves.length > 0 ? safeMoves[Math.floor(Math.random() * safeMoves.length)] : null;
-  }
 
-  // Medium & Hard: Weighted Heuristic Map
-  // Factors: Captures, Saving Self (Atari), Corner/Side preference, Pattern weights
-  let bestMove: Point | null = null;
-  let maxWeight = -Infinity;
 
+
+  // === 围棋 AI (本地) ===
   const opponent = player === 'black' ? 'white' : 'black';
+  const possibleMoves: { x: number; y: number; score: number }[] = [];
+  const candidates = getCandidateMoves(board, size, 2); 
 
-  for (const move of validMoves) {
-      if (isEye(board, move.x, move.y, player)) continue;
-
-      const sim = attemptMove(board, move.x, move.y, player, 'Go', previousBoardHash);
-      if (!sim) continue;
-
-      let weight = Math.random() * 10; // Baseline randomness
-
-      // 1. TACTICAL: Capturing (High Priority)
-      if (sim.captured > 0) {
-          weight += 100 + (sim.captured * 20);
+  // Resign Check:
+  // If we have played enough moves (>30% of board) and we are losing by HUGE margin, resign.
+  // Using calculateWinRate for this check.
+  const winRate = calculateWinRate(board);
+  const totalSpots = size * size;
+  let stoneCount = 0;
+  for(let r=0; r<size; r++) for(let c=0; c<size; c++) if(board[r][c]) stoneCount++;
+  
+  if (difficulty !== 'Easy' && stoneCount > totalSpots * 0.3) {
+      // 检查当前的比分差距
+      const heuristic = calculateHeuristicScore(board);
+      const isBlack = player === 'black'; // AI color
+      const scoreDiff = isBlack ? (heuristic.black - heuristic.white) : (heuristic.white - heuristic.black);
+      
+      // 如果落后超过 35 目，且棋盘比较满，投降
+      // 或者如果落后超过 50 目，直接投降
+      if (scoreDiff < -50 || (scoreDiff < -35 && stoneCount > totalSpots * 0.6)) {
+          return 'RESIGN';
       }
+  }
 
-      // 2. TACTICAL: Save Self (Atari) / Extension
-      // Check neighbors for friendly groups in atari
-      const neighbors = getNeighbors(move, size);
-      let savesGroup = false;
-      neighbors.forEach(n => {
-          const s = board[n.y][n.x];
-          if (s && s.color === player) {
-              const g = getGroup(board, n);
-              if (g && g.liberties === 1) {
-                  // If placing here increases liberties of that group > 1, it's a save
-                  const newSelfGroup = getGroup(sim.newBoard, move);
-                  if (newSelfGroup && newSelfGroup.liberties > 1) {
-                      weight += 80;
-                      savesGroup = true;
-                  }
-              }
-          }
-      });
+  for (const move of candidates) {
+    const { x, y } = move;
+    
+    // 真眼保护
+    if (isSimpleEye(board, x, y, player)) continue;
 
-      // 3. TACTICAL: Atari Opponent (Medium Priority)
-      if (difficulty === 'Hard') {
-          neighbors.forEach(n => {
-             const s = board[n.y][n.x];
-             if (s && s.color === opponent) {
-                 const g = getGroup(board, n);
-                 if (g && g.liberties === 2) {
-                     // Check if this move reduces them to 1 liberty (Atari)
-                     // Note: We need to check the liberties on the NEW board, but simple check is:
-                     // We placed a stone next to them, so we likely took a liberty.
-                     weight += 25;
-                 }
-             }
-          });
-      }
+    // 1. 我方尝试落子
+    const sim = attemptMove(board, x, y, player, 'Go', previousBoardHash);
+    if (!sim) continue;
+    const myNewGroup = getGroup(sim.newBoard, { x, y });
+    if (myNewGroup && myNewGroup.liberties === 0 && sim.captured === 0) continue; // 自杀检测
 
-      // 4. STRATEGIC: Pattern / Influence (Hard Only)
-      if (difficulty === 'Hard') {
-          // Corner preference (Star points)
-          if (size >= 9) {
-              const dX = Math.min(move.x, size - 1 - move.x);
-              const dY = Math.min(move.y, size - 1 - move.y);
-              // 3-3, 3-4, 4-4 points are gold in opening
-              if ((dX === 2 || dX === 3) && (dY === 2 || dY === 3)) {
-                  // Only boost if board is relatively empty nearby
-                  const closeStones = neighbors.filter(n => board[n.y][n.x] !== null).length;
-                  if (closeStones === 0) weight += 15;
-              }
-              // Avoid edges line 0 early game
-              if (dX === 0 || dY === 0) weight -= 5;
-          }
-      }
+    let score = 0;
 
-      // 5. SAFETY: Don't self-atari unless necessary (stupid filter)
-      const myNewGroup = getGroup(sim.newBoard, move);
-      if (myNewGroup && myNewGroup.liberties === 1) {
-          // Only play self-atari if it captured something (snapback logic handled in rule 1)
-          // or if it connects to a safe group (handled in rule 2 check).
-          // If neither, penalize heavily.
-          if (sim.captured === 0 && !savesGroup) {
-              weight -= 200; 
-          }
-      }
+    // --- 基础评估 (Level 0) ---
+    // A. 吃子
+    if (sim.captured > 0) score += 2000 + sim.captured * 150;
+    
+    // B. 叫吃检测 (Atari) - 提升权重
+    const neighbors = getNeighbors({x, y}, size);
+    neighbors.forEach(n => {
+       const stone = board[n.y][n.x];
+       if (stone && stone.color === opponent) {
+           const enemyGroup = getGroup(sim.newBoard, n);
+           if (enemyGroup && enemyGroup.liberties === 1) score += 800; // 制造叫吃 (was 300) -> Aggression Up
+       }
+    });
 
-      // 6. CONTACT: Play near opponent stones (Medium/Hard)
-      // Since difficulty 'Easy' returns early, we don't need to check for it here.
-      const enemyNeighbors = neighbors.filter(n => board[n.y][n.x]?.color === opponent).length;
-      if (enemyNeighbors > 0) weight += 5;
+    // C. 自身安全 (Safety) - 提升权重
+    if (myNewGroup) {
+        if (myNewGroup.liberties === 1) score -= 800; // 除非为了吃子，否则极力避免被叫吃
+        if (myNewGroup.liberties >= 3) score += 100;   // 长气
+    }
 
-      if (weight > maxWeight) {
-          maxWeight = weight;
-          bestMove = move;
-      }
+    // D. 棋形 (Shape)
+    score += evaluateShape(board, x, y, player) * 2; // 提升棋形权重 (Cut, Tiger)
+    score += evaluatePositionStrength(x, y, size);
+
+    // --- 进阶评估 (Level 1: Opponent Response) ---
+    // 现在 Medium 和 Hard 都启用这一层，增加计算深度
+    if (difficulty === 'Hard' || difficulty === 'Medium') {
+       const localResponses = getCandidateMoves(sim.newBoard, size, 2); 
+       let minOpponentOutcome = 0; 
+       let bestOpponentMoves = [];
+       for (const opMove of localResponses) {
+           if (sim.newBoard[opMove.y][opMove.x]) continue; 
+           const opSim = attemptMove(sim.newBoard, opMove.x, opMove.y, opponent, 'Go', null);
+           if (!opSim) continue;
+           
+           let opScore = 0;
+           if (opSim.captured > 0) opScore += 5000; 
+           const opNewGroup = getGroup(opSim.newBoard, {x: opMove.x, y: opMove.y});
+           const myGroupAfterOpStr = getGroup(opSim.newBoard, {x, y});
+           if (myGroupAfterOpStr && myGroupAfterOpStr.liberties === 1) opScore += 1200; // 怕被对方叫吃
+
+           if (opScore > 50) bestOpponentMoves.push({move: opMove, score: opScore});
+       }
+
+       bestOpponentMoves.sort((a,b) => b.score - a.score);
+       const topOp = bestOpponentMoves.slice(0, 1);
+       if (topOp.length > 0) {
+           score -= topOp[0].score; 
+       }
+    }
+
+    // E. 随机扰动 (大幅降低)
+    if (difficulty === 'Easy') score += Math.random() * 150; // was 300
+    // Medium 不再加随机扰动，或者加极少
+    else if (difficulty === 'Medium') score += Math.random() * 20;
+
+    possibleMoves.push({ x, y, score });
+  }
+
+  possibleMoves.sort((a, b) => b.score - a.score);
+  
+  if (possibleMoves.length === 0) return null;
+  const bestMove = possibleMoves[0];
+
+  // Pass Logic Check:
+  // 如果最佳的一步棋分数很低（负分或极低分），说明没棋下了，不如停着
+  // 但为了防止过早停着，我们要求这种状态至少持续几步，或者分数非常低
+  // 简单判定：如果最佳得分 <= 0 且此时不是终局打劫状态，则停着
+  // [Fix] 提高停着门槛：棋盘满了 60% 后才考虑停着，防止中盘突然停着引发强制结算
+  if (bestMove.score <= 0 && stoneCount > size * size * 0.6) {
+       return null; 
+  }
+
+  if (difficulty === 'Easy') {
+    // Top 5 random
+    const topN = possibleMoves.slice(0, 5);
+    return topN[Math.floor(Math.random() * topN.length)];
   }
 
   return bestMove;
+};
+
+// --- SGF Export ---
+// --- SGF Export ---
+export const generateSGF = (
+    history: { board: BoardState, currentPlayer: Player, lastMove: {x:number,y:number}|null }[],
+    boardSize: number,
+    komi: number = 7.5,
+    initialStones: {x: number, y: number, color: Player}[] = []
+): string => {
+    const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    let sgf = `(;GM[1]FF[4]CA[UTF-8]AP[CuteGo:1.0]ST[2]\n`;
+    sgf += `RU[Chinese]SZ[${boardSize}]KM[${komi}]\n`;
+    sgf += `DT[${date}]PW[White]PB[Black]GN[CuteGo Game]\n`;
+
+    // Coordinates mapping: 0->a, 1->b (SGF does NOT skip 'i')
+    const toSgfCoord = (c: number) => String.fromCharCode(97 + c);
+
+    // [Fix] Export Initial Stones (Handicap/Setup)
+    if (initialStones.length > 0) {
+        let ab = "";
+        let aw = "";
+        initialStones.forEach(s => {
+            const coord = toSgfCoord(s.x) + toSgfCoord(s.y);
+            if (s.color === 'black') ab += `[${coord}]`;
+            else aw += `[${coord}]`;
+        });
+        if (ab) sgf += `AB${ab}`;
+        if (aw) sgf += `AW${aw}`;
+        sgf += "\n";
+    }
+
+    history.forEach((h, index) => {
+        // [Fix] History stores 'Next Player' (who is about to move). 
+        // So the move h.lastMove was made by the Opponent.
+        // If h.currentPlayer is 'black', it means White just moved.
+        const color = h.currentPlayer === 'black' ? 'W' : 'B';
+        let moveStr = "";
+        
+        if (h.lastMove) {
+             moveStr = toSgfCoord(h.lastMove.x) + toSgfCoord(h.lastMove.y);
+             sgf += `;${color}[${moveStr}]`;
+        } else {
+             // Skip null moves (setup nodes)
+        }
+    });
+
+    sgf += ")";
+    return sgf;
+};
+
+// --- SGF Import ---
+export const parseSGF = (sgf: string): { 
+    board: BoardState, currentPlayer: Player, gameType: GameType, boardSize: BoardSize, 
+    blackCaptures: number, whiteCaptures: number, history: any[], komi: number,
+    initialStones: {x: number, y: number, color: Player}[] 
+} | null => {
+    try {
+        // 1. Basic Metadata
+        const szMatch = sgf.match(/SZ\[(\d+)\]/);
+        const size = szMatch ? parseInt(szMatch[1]) : 19;
+        const komiMatch = sgf.match(/KM\[([\d.]+)\]/);
+        const komi = komiMatch ? parseFloat(komiMatch[1]) : 7.5;
+        
+        let board = createBoard(size);
+        let currentPlayer: Player = 'black'; // Default start
+        const history: any[] = [];
+        let blackCaptures = 0;
+        let whiteCaptures = 0;
+        let consectivePasses = 0;
+        const initialStones: {x: number, y: number, color: Player}[] = [];
+
+        // 2. Setup Stones (AB/AW)
+        // Matches AB[aa][bb]...
+        const abMatch = sgf.match(/AB((?:\[[a-z]{2}\])+)/);
+        if (abMatch) {
+            const coords = abMatch[1].match(/\[([a-z]{2})\]/g);
+            coords?.forEach(c => {
+                const s = c.replace(/[\[\]]/g, '');
+                const x = s.charCodeAt(0) - 97;
+                const y = s.charCodeAt(1) - 97;
+                if (x >= 0 && x < size && y >= 0 && y < size) {
+                    board[y][x] = { color: 'black', x, y, id: `setup-b-${x}-${y}` };
+                    initialStones.push({x, y, color: 'black'});
+                }
+            });
+        }
+        const awMatch = sgf.match(/AW((?:\[[a-z]{2}\])+)/);
+        if (awMatch) {
+            const coords = awMatch[1].match(/\[([a-z]{2})\]/g);
+            coords?.forEach(c => {
+                const s = c.replace(/[\[\]]/g, '');
+                const x = s.charCodeAt(0) - 97;
+                const y = s.charCodeAt(1) - 97;
+                if (x >= 0 && x < size && y >= 0 && y < size) {
+                    board[y][x] = { color: 'white', x, y, id: `setup-w-${x}-${y}` };
+                    initialStones.push({x, y, color: 'white'});
+                }
+            });
+        }
+
+        // 3. Moves Main Loop
+        const moveRegex = /;([BW])\[([a-z]{0,2})\]/g;
+        let match;
+        
+        while ((match = moveRegex.exec(sgf)) !== null) {
+            const colorCode = match[1]; // B or W
+            const coordStr = match[2]; // aa or empty
+            const player = colorCode === 'B' ? 'black' : 'white';
+            
+            if (!coordStr || coordStr === "" || coordStr === "tt" && size <= 19) {
+                // PASS
+                // [Fix] Store NEXT Player in history context to match App.tsx logic
+                const nextPlayer = player === 'black' ? 'white' : 'black';
+                 history.push({ 
+                    board: board, 
+                    currentPlayer: nextPlayer, 
+                    lastMove: null,
+                    blackCaptures, whiteCaptures, consecutivePasses: consectivePasses + 1 
+                });
+                consectivePasses++;
+                currentPlayer = nextPlayer;
+                continue;
+            }
+
+            const x = coordStr.charCodeAt(0) - 97;
+            const y = coordStr.charCodeAt(1) - 97;
+
+            // Execute Move
+            if (x >= 0 && x < size && y >= 0 && y < size) {
+                const result = attemptMove(board, x, y, player, 'Go'); // Assuming Go for SGF
+                if (result) {
+                    board = result.newBoard;
+                    if (player === 'black') blackCaptures += result.captured;
+                    else whiteCaptures += result.captured;
+                    
+                    const nextPlayer = player === 'black' ? 'white' : 'black';
+
+                    history.push({
+                        board: board,
+                        currentPlayer: nextPlayer, 
+                        lastMove: {x, y},
+                        blackCaptures, whiteCaptures, consecutivePasses: 0
+                    });
+                    consectivePasses = 0;
+                    currentPlayer = nextPlayer;
+                }
+            }
+        }
+
+        return {
+            board,
+            currentPlayer,
+            gameType: 'Go', // SGF is usually Go
+            boardSize: size as BoardSize,
+            blackCaptures,
+            whiteCaptures,
+            history,
+            komi,
+            initialStones
+        };
+
+    } catch (e) {
+        console.error("SGF Parse Failed", e);
+        return null;
+    }
 };
